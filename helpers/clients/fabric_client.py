@@ -75,12 +75,13 @@ class FabricApiClient:
 
         params = params or {}
 
-        # Define a helper to build the full URL from the endpoint.
-
         if not use_pagination:
             url = self._build_url(endpoint=endpoint)
             try:
                 if method.upper() == "POST":
+                    # logger.debug(f"Authorization header: {self._get_headers()}")
+                    # logger.debug(f"Request URL: {url}")
+                    # logger.debug(f"Request parameters: {params}")
                     response = requests.post(
                         url,
                         headers=self._get_headers(),
@@ -97,6 +98,7 @@ class FabricApiClient:
                         params=params,
                         timeout=120,
                     )
+    
                 # LRO support: check for 202 and Operation-Location
                 if lro and response.status_code == 202:
                     op_url = response.headers.get(
@@ -386,21 +388,41 @@ class FabricApiClient:
         if definition:
             payload["definition"] = definition
 
-        response = await self._make_request(
-            endpoint=f"workspaces/{workspace_id}/{item_type}s",
-            method="post",
-            params=payload,
-            lro=lro,
-            lro_poll_interval=0.5,
-        )
-        if response is None:
+        try:
+            response = await self._make_request(
+                endpoint=f"workspaces/{workspace_id}/{item_type}s",
+                method="post",
+                params=payload,
+                lro=lro,
+                lro_poll_interval=0.5,
+            )
+        except requests.RequestException as e:
+            logger.error(f"API call failed: {str(e)}")
+            if e.response is not None:
+                logger.error(f"Response content: {e.response.text}")
             raise ValueError(
                 f"Failed to create item '{name}' of type '{item_type}' in the '{workspace_id}' workspace."
-            )
-        if response.get("displayName") != name:
-            raise ValueError(
-                f"Failed to create item '{name}' of type '{item_type}' in the '{workspace_id}' workspace."
-            )
+            )        
+        
+        # Check if response contains an error
+        if isinstance(response, dict):
+            if "error" in response:
+                error_msg = response.get("error", {}).get("message", "Unknown error")
+                logger.error(f"API error creating item: {error_msg}")
+                raise ValueError(f"Failed to create item '{name}': {error_msg}")
+            
+            # Check if item was created successfully
+            if "id" in response:
+                logger.info(f"Successfully created item '{name}' with ID: {response['id']}")
+                return response
+            
+            # If no ID and no error, log the full response for debugging
+            logger.warning(f"Unexpected response format: {response}")
+        
+        # Legacy check - may not be reliable for all item types
+        if hasattr(response, 'get') and response.get("displayName") and response.get("displayName") != name:
+            logger.warning(f"Response displayName '{response.get('displayName')}' doesn't match requested name '{name}', but this may be normal")
+        
         return response
 
     async def resolve_item_name_and_id(

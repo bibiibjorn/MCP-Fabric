@@ -48,20 +48,32 @@ class NotebookClient:
         self, workspace: str, notebook_name: str, content: str
     ) -> Dict[str, Any]:
         """Create a new notebook."""
-        workspace, workspace_id = await self.client.resolve_workspace_name_and_id(
-            workspace
-        )
-        if not workspace_id:
-            raise ValueError("Invalid workspace ID.")
-        logger.info(f"Creating notebook '{notebook_name}' in workspace '{workspace}'.")
-        response = await self.client.create_notebook(
-            workspace_id=workspace_id,
-            notebook_name=notebook_name,
-            ipynb_name=notebook_name,
-            content=content,
-        )
+        try:
+            workspace, workspace_id = await self.client.resolve_workspace_name_and_id(
+                workspace
+            )
+            if not workspace_id:
+                raise ValueError("Invalid workspace ID.")
+            
+            logger.info(f"Creating notebook '{notebook_name}' in workspace '{workspace}' (ID: {workspace_id}).")
+            
+            try:
+                response = await self.client.create_notebook(
+                    workspace_id=workspace_id,
+                    notebook_name=notebook_name,
+                    ipynb_name=notebook_name,
+                    content=content,
+                )
+            except Exception as e:
+                error_msg = f"Failed to create notebook '{notebook_name}' in workspace '{workspace}': {str(e)}"
+                logger.error(error_msg)
+                return error_msg
 
-        if not response.get("id"):
-            return f"Failed to create notebook '{notebook_name}' in workspace '{workspace}'."
-
-        return response
+            
+            logger.info(f"Successfully created notebook '{notebook_name}' with ID: {response['id']}")
+            return response
+            
+        except Exception as e:
+            error_msg = f"Error creating notebook '{notebook_name}': {str(e)}"
+            logger.error(error_msg)
+            return error_msg

@@ -1608,13 +1608,25 @@ async def list_spark_jobs(
         markdown += "| Livy ID | Item Name | Type | State | Submitted | Duration | Operation |\n"
         markdown += "|---------|-----------|------|-------|-----------|----------|----------|\n"
 
+        failed_jobs = []
         for session in sessions:
             job_id = session.get("livyId", "N/A")
             item_name = session.get("itemName", "N/A")
+            item_info = session.get("item", {})
+            item_id = item_info.get("id", "") if isinstance(item_info, dict) else ""
             item_type = session.get("itemType", "N/A")
             job_state = session.get("state", "Unknown")
             submitted_time = session.get("submittedDateTime", "N/A")
             operation = session.get("operationName", "N/A")
+
+            # Track failed jobs for detailed section
+            if job_state == "Failed":
+                failed_jobs.append({
+                    "item_name": item_name,
+                    "item_id": item_id,
+                    "livy_id": job_id,
+                    "submitted": submitted_time
+                })
 
             # Format submitted time to be shorter
             if submitted_time and submitted_time != "N/A":
@@ -1672,6 +1684,18 @@ async def list_spark_jobs(
             markdown += ", ".join([f"{k}: {v}" for k, v in sorted(state_counts.items())])
             markdown += "\n"
 
+        # Add detailed section for failed jobs with IDs needed for get_job_details
+        if failed_jobs:
+            markdown += f"\n## Failed Jobs ({len(failed_jobs)})\n\n"
+            markdown += "To get error details, use `get_job_details` with the Livy ID and notebook:\n\n"
+            for fj in failed_jobs[:10]:  # Limit to 10 to avoid huge output
+                markdown += f"- **{fj['item_name']}**\n"
+                markdown += f"  - Livy ID: `{fj['livy_id']}`\n"
+                if fj['item_id']:
+                    markdown += f"  - Item ID: `{fj['item_id']}`\n"
+            if len(failed_jobs) > 10:
+                markdown += f"\n*...and {len(failed_jobs) - 10} more failed jobs*\n"
+
         return markdown
 
     except Exception as e:
@@ -1685,6 +1709,7 @@ async def list_all_spark_jobs(
     state: Optional[str] = None,
     item_type: Optional[str] = None,
     limit: int = 50,
+    last_per_workspace: bool = False,
     ctx: Context = None
 ) -> str:
     """List Spark jobs across multiple workspaces.
@@ -1697,11 +1722,14 @@ async def list_all_spark_jobs(
         state: Filter by job state: NotStarted, InProgress, Cancelled, Failed, Succeeded (optional)
         item_type: Filter by item type: Notebook, SparkJobDefinition, Lakehouse (optional)
         limit: Maximum number of jobs to return per workspace (default: 50)
+        last_per_workspace: If True, only return the most recent job from each workspace (fast mode)
         ctx: Context object containing client information
 
     Returns:
         Formatted list of Spark jobs across workspaces with status, runtime, and workspace information
     """
+    import asyncio
+
     try:
         if ctx is None:
             raise ValueError("Context (ctx) must be provided.")
@@ -1726,17 +1754,23 @@ async def list_all_spark_jobs(
         if not workspace_list:
             return "No workspaces found or accessible."
 
-        # Collect jobs from all workspaces
+        # Determine how many jobs to fetch per workspace
+        jobs_per_workspace = 1 if last_per_workspace else limit
+
+        # Collect jobs from all workspaces concurrently
         all_jobs = []
         workspace_errors = []
 
-        for ws_id, ws_name in workspace_list:
+        async def fetch_workspace_jobs(ws_id: str, ws_name: str):
+            """Fetch jobs from a single workspace."""
             try:
                 filters = {}
                 if state:
                     filters["state"] = state
 
-                sessions = await spark_client.list_workspace_sessions(ws_id, filters)
+                sessions = await spark_client.list_workspace_sessions(
+                    ws_id, filters, max_results=jobs_per_workspace
+                )
 
                 if sessions:
                     # Apply item_type filter if specified
@@ -1744,14 +1778,26 @@ async def list_all_spark_jobs(
                         sessions = [s for s in sessions if s.get("itemType") == item_type]
 
                     # Add workspace info to each session
-                    for s in sessions[:limit]:
+                    result = []
+                    for s in sessions[:jobs_per_workspace]:
                         s['_workspace_id'] = ws_id
                         s['_workspace_name'] = ws_name
-                        all_jobs.append(s)
-
+                        result.append(s)
+                    return result, None
+                return [], None
             except Exception as e:
-                workspace_errors.append(f"{ws_name}: {str(e)}")
-                logger.warning(f"Error fetching jobs from workspace '{ws_name}': {e}")
+                return [], f"{ws_name}: {str(e)}"
+
+        # Execute all workspace fetches concurrently
+        tasks = [fetch_workspace_jobs(ws_id, ws_name) for ws_id, ws_name in workspace_list]
+        results = await asyncio.gather(*tasks)
+
+        for jobs, error in results:
+            if error:
+                workspace_errors.append(error)
+                logger.warning(f"Error fetching jobs: {error}")
+            else:
+                all_jobs.extend(jobs)
 
         # Sort by submitted time (most recent first)
         all_jobs.sort(key=lambda x: x.get('submittedDateTime', ''), reverse=True)
@@ -1767,6 +1813,8 @@ async def list_all_spark_jobs(
 
         # Format as markdown
         markdown = f"# Spark Jobs Across Workspaces\n\n"
+        if last_per_workspace:
+            markdown += f"**Mode:** Last job per workspace (fast)\n"
         markdown += f"**Workspaces queried:** {len(workspace_list)}\n"
         if state:
             markdown += f"**State filter:** {state}\n"
@@ -1777,13 +1825,28 @@ async def list_all_spark_jobs(
         markdown += "| Workspace | Item Name | Type | State | Submitted | Duration | Livy ID |\n"
         markdown += "|-----------|-----------|------|-------|-----------|----------|--------|\n"
 
+        failed_jobs = []
         for session in all_jobs:
             ws_name = session.get("_workspace_name", "Unknown")
+            ws_id = session.get("_workspace_id", "")
             item_name = session.get("itemName", "N/A")
+            item_info = session.get("item", {})
+            item_id = item_info.get("id", "") if isinstance(item_info, dict) else ""
             item_type_val = session.get("itemType", "N/A")
             job_state = session.get("state", "Unknown")
             submitted_time = session.get("submittedDateTime", "N/A")
             job_id = session.get("livyId", "N/A")
+
+            # Track failed jobs for detailed section
+            if job_state == "Failed":
+                failed_jobs.append({
+                    "workspace": ws_name,
+                    "workspace_id": ws_id,
+                    "item_name": item_name,
+                    "item_id": item_id,
+                    "livy_id": job_id,
+                    "submitted": submitted_time
+                })
 
             # Format submitted time
             if submitted_time and submitted_time != "N/A":
@@ -1813,6 +1876,18 @@ async def list_all_spark_jobs(
             markdown += f"| {short_ws} | {item_name} | {item_type_val} | {status_emoji} {job_state} | {submitted_time} | {duration} | `{short_job_id}` |\n"
 
         markdown += f"\n**Total jobs:** {len(all_jobs)}\n"
+
+        # Add detailed section for failed jobs with IDs needed for get_job_details
+        if failed_jobs:
+            markdown += f"\n## Failed Jobs ({len(failed_jobs)})\n\n"
+            markdown += "To get error details, use `get_job_details` with the Livy ID and notebook name/ID:\n\n"
+            for fj in failed_jobs[:10]:  # Limit to 10 to avoid huge output
+                markdown += f"- **{fj['item_name']}** in `{fj['workspace']}`\n"
+                markdown += f"  - Livy ID: `{fj['livy_id']}`\n"
+                if fj['item_id']:
+                    markdown += f"  - Item ID: `{fj['item_id']}`\n"
+            if len(failed_jobs) > 10:
+                markdown += f"\n*...and {len(failed_jobs) - 10} more failed jobs*\n"
 
         # Summary statistics
         state_counts = {}

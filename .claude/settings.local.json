@@ -12,7 +12,11 @@
       "Bash(uv sync:*)",
       "Bash(uv run python:*)",
       "Bash(grep:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Read(//c/Users/bjorn.braet/AppData/Roaming/Claude/**)",
+      "WebFetch(domain:semantic-link-labs.readthedocs.io)",
+      "Bash(.venvScriptspython -c \"\nimport asyncio\nfrom helpers.utils.authentication import get_azure_credentials\nfrom helpers.clients.fabric_client import FabricApiClient\n\nasync def get_ids\\(\\):\n    cred = get_azure_credentials\\(''test'', {}\\)\n    client = FabricApiClient\\(cred\\)\n    \n    # Get workspaces\n    workspaces = await client.get_workspaces\\(\\)\n    print\\(''=== WORKSPACES ===''\\)\n    for ws in workspaces[:5]:\n        print\\(f\"\"{ws.get\\(''id''\\)} - {ws.get\\(''displayName''\\)}\"\"\\)\n    \n    if workspaces:\n        ws_id = workspaces[0][''id'']\n        print\\(f''\\\\nUsing workspace: {ws_id}''\\)\n        \n        # Get semantic models\n        models = await client.get_semantic_models\\(ws_id\\)\n        print\\(''\\\\n=== SEMANTIC MODELS ===''\\)\n        for m in models[:5]:\n            print\\(f\"\"{m.get\\(''id''\\)} - {m.get\\(''displayName''\\)}\"\"\\)\n\nasyncio.run\\(get_ids\\(\\)\\)\n\")",
+      "Bash(.venv\\\\Scripts\\\\python.exe:*)"
     ]
   }
 }

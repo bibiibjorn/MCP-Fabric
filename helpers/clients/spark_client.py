@@ -51,7 +51,7 @@ class SparkClient:
         return sessions if sessions else []
 
     async def list_workspace_sessions(
-        self, workspace_id: str, filters: Optional[Dict[str, Any]] = None
+        self, workspace_id: str, filters: Optional[Dict[str, Any]] = None, max_results: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
         List all Livy sessions in a workspace with optional filters.
@@ -61,18 +61,24 @@ class SparkClient:
         Args:
             workspace_id: Workspace ID (UUID)
             filters: Optional filters (state, submittedDateTime, endDateTime, submitter.Id)
+            max_results: Optional limit on number of results (skips pagination if set low)
 
         Returns:
             List of Livy session objects
         """
         # Use beta endpoint for filtering support
         endpoint = f"workspaces/{workspace_id}/spark/livySessions?beta=true"
-        logger.info(f"Listing all Livy sessions in workspace {workspace_id}")
+        logger.info(f"Listing Livy sessions in workspace {workspace_id}" + (f" (max: {max_results})" if max_results else ""))
+
+        # Copy filters to avoid modifying the original dict
+        filters = dict(filters) if filters else {}
 
         # Extract state filter for client-side filtering (API doesn't reliably filter by state)
-        state_filter = filters.pop("state", None) if filters else None
-        params = filters or {}
+        state_filter = filters.pop("state", None)
+        params = filters
 
+        # Always use pagination to ensure we get all results, then limit client-side
+        # The API doesn't guarantee ordering, so we need all results to find the most recent
         sessions = await self.client._make_request(
             endpoint=endpoint, use_pagination=True, data_key="value", params=params
         )
@@ -82,6 +88,14 @@ class SparkClient:
         # Apply client-side state filtering since the API doesn't reliably support it
         if state_filter and sessions:
             sessions = [s for s in sessions if s.get("state") == state_filter]
+
+        # Always sort by submittedDateTime descending to get most recent first
+        if sessions:
+            sessions.sort(key=lambda x: x.get('submittedDateTime', ''), reverse=True)
+
+        # Apply max_results limit after sorting
+        if max_results and len(sessions) > max_results:
+            sessions = sessions[:max_results]
 
         return sessions
 

@@ -99,13 +99,32 @@ class FabricApiClient:
                         timeout=120,
                     )
     
-                # LRO support: check for 202 and Operation-Location
+                # LRO support: check for 202 and Operation-Location or Location header
                 if lro and response.status_code == 202:
-                    op_url = response.headers.get(
-                        "Operation-Location"
-                    ) or response.headers.get("operation-location")
+                    # Fabric API uses different headers for LRO
+                    op_url = (
+                        response.headers.get("Operation-Location")
+                        or response.headers.get("operation-location")
+                        or response.headers.get("Location")
+                        or response.headers.get("location")
+                    )
                     if not op_url:
-                        logger.error("LRO: No Operation-Location header found.")
+                        # Some endpoints return 202 with Retry-After but result in body
+                        retry_after = response.headers.get("Retry-After")
+                        if retry_after:
+                            logger.info(f"LRO: Retry-After header found, waiting {retry_after}s...")
+                            time.sleep(int(retry_after))
+                            # Retry the same request
+                            response = requests.post(
+                                url,
+                                headers=self._get_headers(),
+                                json=params,
+                                timeout=120,
+                            )
+                            if response.status_code == 200:
+                                return response.json()
+                        logger.error("LRO: No Operation-Location or Location header found.")
+                        logger.debug(f"LRO: Response headers: {dict(response.headers)}")
                         return None
                     logger.info(f"LRO: Polling {op_url} for operation status...")
                     start_time = time.time()
@@ -129,6 +148,20 @@ class FabricApiClient:
                             "completed",
                         ):
                             logger.info("LRO: Operation succeeded.")
+                            # Check if there's a result URL to fetch the actual data
+                            # The result is at /operations/{operationId}/result
+                            if "/operations/" in op_url:
+                                result_url = op_url.rstrip("/") + "/result"
+                                logger.info(f"LRO: Fetching result from {result_url}")
+                                result_resp = requests.get(
+                                    result_url, headers=self._get_headers(), timeout=60
+                                )
+                                if result_resp.status_code == 200:
+                                    return result_resp.json()
+                                else:
+                                    logger.warning(
+                                        f"LRO: Result fetch returned {result_resp.status_code}, returning poll data"
+                                    )
                             return poll_data
                         if status in ("Failed", "failed", "Canceled", "canceled"):
                             logger.error(
@@ -551,6 +584,32 @@ class FabricApiClient:
         """Get a specific notebook by ID"""
         return await self.get_item(
             item_id=notebook_id, workspace_id=workspace_id, item_type="notebook"
+        )
+
+    async def get_notebook_definition(self, workspace_id: str, notebook_id: str) -> Dict:
+        """Get the definition (content) of a specific notebook.
+
+        Uses the getDefinition endpoint which returns the actual notebook content
+        including the .ipynb payload.
+
+        Args:
+            workspace_id: ID of the workspace
+            notebook_id: ID of the notebook
+
+        Returns:
+            Dictionary containing the notebook definition with parts including the ipynb content.
+        """
+        if not _is_valid_uuid(workspace_id):
+            raise ValueError("Invalid workspace ID.")
+        if not _is_valid_uuid(notebook_id):
+            raise ValueError("Invalid notebook ID.")
+
+        return await self._make_request(
+            f"workspaces/{workspace_id}/notebooks/{notebook_id}/getDefinition",
+            method="POST",
+            lro=True,
+            lro_poll_interval=1,
+            lro_timeout=120
         )
 
     async def create_notebook(

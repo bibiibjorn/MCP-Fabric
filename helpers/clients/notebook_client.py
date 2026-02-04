@@ -44,6 +44,34 @@ class NotebookClient:
 
         return notebook
 
+    async def get_notebook_definition(self, workspace: str, notebook_id: str) -> Dict[str, Any]:
+        """Get the definition (content) of a specific notebook.
+
+        This method calls the getDefinition endpoint which returns the actual
+        notebook content including the .ipynb payload with all cells and code.
+
+        Args:
+            workspace: ID of the workspace (must be a valid UUID)
+            notebook_id: ID of the notebook (must be a valid UUID)
+
+        Returns:
+            Dictionary containing the notebook definition with parts including the ipynb content,
+            or an error message string if the notebook is not found.
+        """
+        if not _is_valid_uuid(workspace):
+            raise ValueError("Invalid workspace ID.")
+        if not _is_valid_uuid(notebook_id):
+            raise ValueError("Invalid notebook ID.")
+
+        definition = await self.client.get_notebook_definition(workspace, notebook_id)
+
+        if not definition:
+            return (
+                f"No notebook definition found for ID '{notebook_id}' in workspace '{workspace}'."
+            )
+
+        return definition
+
     async def create_notebook(
         self, workspace: str, notebook_name: str, content: str
     ) -> Dict[str, Any]:

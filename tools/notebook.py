@@ -5,6 +5,7 @@ from helpers.clients import (
     FabricApiClient,
     NotebookClient,
 )
+from helpers.utils import _is_valid_uuid
 import json
 from helpers.logging_config import get_logger
 
@@ -31,10 +32,13 @@ async def list_notebooks(workspace: Optional[str] = None, ctx: Context = None) -
         if ctx is None:
             raise ValueError("Context (ctx) must be provided.")
 
-        notebook_client = NotebookClient(
-            FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
-        )
-        return await notebook_client.list_notebooks(workspace)
+        fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+        notebook_client = NotebookClient(fabric_client)
+
+        # Resolve workspace name to ID if needed
+        workspace_id = await fabric_client.resolve_workspace(workspace)
+
+        return await notebook_client.list_notebooks(workspace_id)
     except Exception as e:
         logger.error(f"Error listing notebooks: {str(e)}")
         return f"Error listing notebooks: {str(e)}"
@@ -90,11 +94,14 @@ async def create_notebook(
 
 @mcp.tool()
 async def get_notebook_content(
-    workspace: str, 
-    notebook_id: str, 
+    workspace: str,
+    notebook_id: str,
     ctx: Context = None
 ) -> str:
     """Get the content of a specific notebook in a Fabric workspace.
+
+    This retrieves the actual notebook script/code by calling the getDefinition
+    endpoint, which returns the full notebook content including all cells.
 
     Args:
         workspace: Name or ID of the workspace
@@ -107,30 +114,56 @@ async def get_notebook_content(
         if ctx is None:
             raise ValueError("Context (ctx) must be provided.")
 
-        notebook_client = NotebookClient(
-            FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
-        )
-        
-        # Get the notebook details
-        notebook = await notebook_client.get_notebook(workspace, notebook_id)
-        
-        if isinstance(notebook, str):  # Error message
-            return notebook
-            
-        # Extract and decode the notebook content
-        definition = notebook.get("definition", {})
-        parts = definition.get("parts", [])
-        
+        fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+        notebook_client = NotebookClient(fabric_client)
+
+        # Resolve workspace ID if name provided
+        workspace_id = await fabric_client.resolve_workspace(workspace)
+
+        # Resolve notebook ID if name provided
+        if not _is_valid_uuid(notebook_id):
+            notebook_resolved_id = await fabric_client.resolve_item_id(
+                item=notebook_id, type="Notebook", workspace=workspace_id
+            )
+        else:
+            notebook_resolved_id = notebook_id
+
+        # Get the notebook definition (actual content) using getDefinition endpoint
+        definition = await notebook_client.get_notebook_definition(workspace_id, notebook_resolved_id)
+
+        if isinstance(definition, str):  # Error message
+            return definition
+
+        # Extract and decode the notebook content from the definition
+        parts = definition.get("definition", {}).get("parts", [])
+
+        # Priority order: .ipynb first, then notebook-content.py (Fabric native format)
         for part in parts:
-            if part.get("path", "").endswith(".ipynb"):
+            path = part.get("path", "")
+            if path.endswith(".ipynb"):
                 payload = part.get("payload", "")
                 if payload:
                     # Decode base64 content
                     decoded_content = base64.b64decode(payload).decode("utf-8")
                     return decoded_content
-        
+
+        # Fallback to Fabric's native .py format (notebook-content.py)
+        for part in parts:
+            path = part.get("path", "")
+            if path == "notebook-content.py" or path.endswith(".py"):
+                payload = part.get("payload", "")
+                if payload:
+                    # Decode base64 content
+                    decoded_content = base64.b64decode(payload).decode("utf-8")
+                    return decoded_content
+
+        # If no content found, list available parts for debugging
+        if parts:
+            part_paths = [p.get("path", "unknown") for p in parts]
+            return f"No notebook content found. Available parts: {part_paths}"
+
         return "No notebook content found in the definition."
-        
+
     except Exception as e:
         logger.error(f"Error getting notebook content: {str(e)}")
         return f"Error getting notebook content: {str(e)}"

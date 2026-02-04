@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile:*)",
+      "Bash(cd /c/Users/bjorn.braet/powerbi-mcp-servers/MCP-Fabric-Python Based)",
+      "Bash(.venv/Scripts/python.exe:*)"
+    ]
+  }
+}

@@ -19,6 +19,7 @@ AUTH_RECORD_PATH = os.path.join(
 
 FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 SQL_SCOPE = "https://database.windows.net/.default"
+POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
 
 # Singleton credential instance for both REST API and SQL/TDS connections
 _shared_credential = None

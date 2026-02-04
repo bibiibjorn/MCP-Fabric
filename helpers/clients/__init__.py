@@ -8,6 +8,7 @@ from helpers.clients.fabric_client import FabricApiClient, FabricApiConfig
 from helpers.clients.sql_client import SQLClient, get_sql_endpoint
 from helpers.clients.notebook_client import NotebookClient
 from helpers.clients.spark_client import SparkClient
+from helpers.clients.powerbi_client import PowerBIClient
 
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "SQLClient",
     "get_sql_endpoint",
     "SparkClient",
+    "PowerBIClient",
 ]

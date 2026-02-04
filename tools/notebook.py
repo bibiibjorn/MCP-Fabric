@@ -863,6 +863,183 @@ async def validate_pyspark_code(
         logger.error(f"Error validating PySpark code: {str(e)}")
         return f"Error validating PySpark code: {str(e)}"
 
+def _parse_fabric_py_to_cells(py_content: str) -> List[Dict[str, Any]]:
+    """Parse Fabric's native notebook-content.py format into cells.
+
+    Fabric notebooks in .py format use special markers:
+    - # METADATA **{...}** - notebook metadata
+    - # MARKDOWN **...**  - markdown cells
+    - # CELL **{...}**    - code cell metadata
+    - # PARAMETERS        - parameter cell marker
+
+    Args:
+        py_content: The Python content from notebook-content.py
+
+    Returns:
+        List of cell dictionaries in ipynb format
+    """
+    cells = []
+    lines = py_content.split('\n')
+    current_cell = None
+    current_source = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # Check for markdown cell
+        if line.strip().startswith('# MARKDOWN **'):
+            # Save previous cell
+            if current_cell is not None:
+                current_cell["source"] = current_source
+                cells.append(current_cell)
+
+            # Extract markdown content (may span multiple lines)
+            markdown_content = []
+            # Get content after MARKDOWN **
+            content_start = line.find('# MARKDOWN **') + len('# MARKDOWN **')
+            first_line = line[content_start:]
+
+            if first_line.endswith('**'):
+                # Single line markdown
+                markdown_content.append(first_line[:-2])
+            else:
+                markdown_content.append(first_line)
+                i += 1
+                while i < len(lines) and not lines[i].rstrip().endswith('**'):
+                    markdown_content.append(lines[i])
+                    i += 1
+                if i < len(lines):
+                    # Last line, remove trailing **
+                    last_line = lines[i].rstrip()
+                    if last_line.endswith('**'):
+                        markdown_content.append(last_line[:-2])
+
+            current_cell = {
+                "cell_type": "markdown",
+                "metadata": {},
+                "source": [l + '\n' for l in markdown_content[:-1]] + [markdown_content[-1]] if markdown_content else []
+            }
+            cells.append(current_cell)
+            current_cell = None
+            current_source = []
+
+        # Check for code cell marker
+        elif line.strip().startswith('# CELL **'):
+            # Save previous cell
+            if current_cell is not None:
+                current_cell["source"] = current_source
+                cells.append(current_cell)
+
+            # Parse cell metadata if present
+            metadata = {}
+            try:
+                meta_start = line.find('# CELL **') + len('# CELL **')
+                meta_end = line.rfind('**')
+                if meta_end > meta_start:
+                    meta_str = line[meta_start:meta_end]
+                    metadata = json.loads(meta_str)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+            current_cell = {
+                "cell_type": "code",
+                "execution_count": None,
+                "outputs": [],
+                "metadata": metadata,
+            }
+            current_source = []
+
+        # Check for metadata line (skip)
+        elif line.strip().startswith('# METADATA **'):
+            pass
+
+        # Check for parameters marker
+        elif line.strip() == '# PARAMETERS':
+            if current_cell is None:
+                current_cell = {
+                    "cell_type": "code",
+                    "execution_count": None,
+                    "outputs": [],
+                    "metadata": {"tags": ["parameters"]},
+                }
+                current_source = []
+
+        # Regular code line
+        elif current_cell is not None:
+            current_source.append(line + '\n')
+
+        # Start of first cell if no marker seen yet
+        elif line.strip() and not line.strip().startswith('#'):
+            current_cell = {
+                "cell_type": "code",
+                "execution_count": None,
+                "outputs": [],
+                "metadata": {},
+            }
+            current_source = [line + '\n']
+
+        i += 1
+
+    # Don't forget the last cell
+    if current_cell is not None:
+        # Remove trailing empty lines from source
+        while current_source and current_source[-1].strip() == '':
+            current_source.pop()
+        if current_source:
+            # Remove newline from last line
+            current_source[-1] = current_source[-1].rstrip('\n')
+        current_cell["source"] = current_source
+        cells.append(current_cell)
+
+    return cells
+
+
+def _cells_to_fabric_py(cells: List[Dict[str, Any]]) -> str:
+    """Convert cells back to Fabric's native notebook-content.py format.
+
+    Args:
+        cells: List of cell dictionaries in ipynb format
+
+    Returns:
+        Python content string in Fabric format
+    """
+    output_lines = []
+
+    for cell in cells:
+        cell_type = cell.get("cell_type", "code")
+        source = cell.get("source", [])
+
+        # Convert source to string if it's a list
+        if isinstance(source, list):
+            source_str = ''.join(source)
+        else:
+            source_str = source
+
+        if cell_type == "markdown":
+            # Wrap in MARKDOWN markers
+            output_lines.append(f"# MARKDOWN **{source_str}**")
+            output_lines.append("")
+
+        elif cell_type == "code":
+            metadata = cell.get("metadata", {})
+
+            # Add CELL marker with metadata
+            if metadata:
+                output_lines.append(f"# CELL **{json.dumps(metadata)}**")
+            else:
+                output_lines.append("# CELL **{}**")
+
+            # Check for parameters tag
+            if "parameters" in metadata.get("tags", []):
+                output_lines.append("# PARAMETERS")
+
+            output_lines.append(source_str.rstrip())
+            output_lines.append("")
+
+    return '\n'.join(output_lines)
+
+
 @mcp.tool()
 async def update_notebook_cell(
     workspace: str,
@@ -888,39 +1065,146 @@ async def update_notebook_cell(
         if ctx is None:
             raise ValueError("Context (ctx) must be provided.")
 
-        # Get current notebook content
-        current_content = await get_notebook_content(workspace, notebook_id, ctx)
-        
-        if current_content.startswith("Error"):
-            return current_content
-        
-        # Parse the notebook JSON
-        notebook_data = json.loads(current_content)
-        cells = notebook_data.get("cells", [])
-        
-        if cell_index >= len(cells):
-            return f"Cell index {cell_index} is out of range. Notebook has {len(cells)} cells."
-        
-        # Update the cell
+        fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+        notebook_client = NotebookClient(fabric_client)
+
+        # Resolve workspace ID
+        workspace_id = await fabric_client.resolve_workspace(workspace)
+
+        # Resolve notebook ID and get notebook name
+        if not _is_valid_uuid(notebook_id):
+            notebook_name = notebook_id
+            notebook_resolved_id = await fabric_client.resolve_item_id(
+                item=notebook_id, type="Notebook", workspace=workspace_id
+            )
+        else:
+            notebook_resolved_id = notebook_id
+            # Get notebook metadata to get the name
+            notebook_meta = await notebook_client.get_notebook(workspace_id, notebook_resolved_id)
+            if isinstance(notebook_meta, dict):
+                notebook_name = notebook_meta.get("displayName", "notebook")
+            else:
+                notebook_name = "notebook"
+
+        # Get the raw notebook definition to determine format
+        definition = await notebook_client.get_notebook_definition(workspace_id, notebook_resolved_id)
+
+        if isinstance(definition, str):
+            return f"Error getting notebook definition: {definition}"
+
+        if definition is None:
+            return "Error: Failed to get notebook definition (API returned None)"
+
+        # Extract parts from the definition
+        parts = definition.get("definition", {}).get("parts", [])
+
+        if not parts:
+            return "Error: Notebook definition has no parts"
+
+        # Determine the notebook format and find the content
+        notebook_format = None
+        content_part = None
+        content_path = None
+
+        for part in parts:
+            path = part.get("path", "")
+            if path.endswith(".ipynb"):
+                notebook_format = "ipynb"
+                content_part = part
+                content_path = path
+                break
+            elif path == "notebook-content.py" or path.endswith(".py"):
+                notebook_format = "py"
+                content_part = part
+                content_path = path
+
+        if content_part is None:
+            part_paths = [p.get("path", "unknown") for p in parts]
+            return f"Error: No notebook content found. Available parts: {part_paths}"
+
+        # Decode the content
+        payload = content_part.get("payload", "")
+        if not payload:
+            return "Error: Notebook content payload is empty"
+
+        try:
+            decoded_content = base64.b64decode(payload).decode("utf-8")
+        except Exception as e:
+            return f"Error decoding notebook content: {str(e)}"
+
+        # Parse content based on format
+        if notebook_format == "ipynb":
+            try:
+                notebook_data = json.loads(decoded_content)
+                cells = notebook_data.get("cells", [])
+            except json.JSONDecodeError as e:
+                return f"Error parsing notebook JSON: {str(e)}"
+        else:
+            # Parse Fabric's native .py format
+            cells = _parse_fabric_py_to_cells(decoded_content)
+            # Create a minimal notebook structure
+            notebook_data = {
+                "nbformat": 4,
+                "nbformat_minor": 5,
+                "metadata": {"language_info": {"name": "python"}},
+                "cells": cells
+            }
+
+        if not cells:
+            return "Error: Notebook has no cells"
+
+        if cell_index < 0 or cell_index >= len(cells):
+            return f"Cell index {cell_index} is out of range. Notebook has {len(cells)} cells (0-{len(cells)-1})."
+
+        # Prepare source as list of lines (ipynb format)
+        if isinstance(cell_content, str):
+            source_lines = cell_content.split('\n')
+            # Add newline to all lines except the last
+            source_lines = [line + '\n' if i < len(source_lines) - 1 else line
+                           for i, line in enumerate(source_lines)]
+        else:
+            source_lines = cell_content
+
+        # Update the cell, preserving existing metadata where possible
+        existing_cell = cells[cell_index]
         cells[cell_index] = {
             "cell_type": cell_type,
-            "source": cell_content.split('\n') if isinstance(cell_content, str) else cell_content,
-            "execution_count": None,
-            "outputs": [],
-            "metadata": {}
+            "source": source_lines,
+            "metadata": existing_cell.get("metadata", {}),
         }
-        
-        # Update the notebook
+
+        # Add code-specific fields
+        if cell_type == "code":
+            cells[cell_index]["execution_count"] = None
+            cells[cell_index]["outputs"] = []
+
+        # Update notebook data
+        notebook_data["cells"] = cells
+
+        # Serialize back to the original format
+        # Always use ipynb format for updateDefinition as it's more reliable
         updated_content = json.dumps(notebook_data, indent=2)
-        
-        notebook_client = NotebookClient(
-            FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+
+        # Call the update API
+        result = await notebook_client.update_notebook_definition(
+            workspace=workspace_id,
+            notebook_id=notebook_resolved_id,
+            content=updated_content,
+            notebook_name=notebook_name,
         )
-        
-        # This would require implementing an update method in the client
-        # For now, return a success message indicating what would be updated
-        return f"Cell {cell_index} updated successfully with {cell_type} content (length: {len(cell_content)} characters)"
-        
+
+        # Check for errors in the result
+        if result is None:
+            return "Error: Update API returned None - the operation may have failed"
+
+        if isinstance(result, dict) and "error" in result:
+            return f"Error updating notebook: {result['error']}"
+
+        return f"Successfully updated cell {cell_index} in notebook '{notebook_name}' with {cell_type} content ({len(cell_content)} characters)."
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing notebook JSON: {str(e)}")
+        return f"Error parsing notebook content: {str(e)}"
     except Exception as e:
         logger.error(f"Error updating notebook cell: {str(e)}")
         return f"Error updating notebook cell: {str(e)}"

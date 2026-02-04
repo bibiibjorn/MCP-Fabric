@@ -651,3 +651,53 @@ class FabricApiClient:
             name=notebook_name,
             definition=definition,
         )
+
+    async def update_notebook_definition(
+        self, workspace_id: str, notebook_id: str, content: str, ipynb_name: str
+    ) -> Dict:
+        """Update the definition (content) of an existing notebook.
+
+        Uses the updateDefinition endpoint to update the notebook content.
+
+        Args:
+            workspace_id: ID of the workspace
+            notebook_id: ID of the notebook
+            content: The notebook content as JSON string
+            ipynb_name: The name of the ipynb file (without extension)
+
+        Returns:
+            Dictionary with the update result or error.
+        """
+        if not _is_valid_uuid(workspace_id):
+            raise ValueError("Invalid workspace ID.")
+        if not _is_valid_uuid(notebook_id):
+            raise ValueError("Invalid notebook ID.")
+
+        # Build the definition payload
+        definition = {
+            "definition": {
+                "format": "ipynb",
+                "parts": [
+                    {
+                        "path": f"{ipynb_name}.ipynb",
+                        "payload": base64.b64encode(
+                            content
+                            if isinstance(content, bytes)
+                            else content.encode("utf-8")
+                        ).decode("utf-8"),
+                        "payloadType": "InlineBase64",
+                    }
+                ],
+            }
+        }
+
+        logger.info(f"Updating notebook '{notebook_id}' in workspace '{workspace_id}'.")
+
+        return await self._make_request(
+            f"workspaces/{workspace_id}/notebooks/{notebook_id}/updateDefinition",
+            method="POST",
+            params=definition,
+            lro=True,
+            lro_poll_interval=1,
+            lro_timeout=120
+        )

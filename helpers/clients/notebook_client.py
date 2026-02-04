@@ -82,9 +82,9 @@ class NotebookClient:
             )
             if not workspace_id:
                 raise ValueError("Invalid workspace ID.")
-            
+
             logger.info(f"Creating notebook '{notebook_name}' in workspace '{workspace}' (ID: {workspace_id}).")
-            
+
             try:
                 response = await self.client.create_notebook(
                     workspace_id=workspace_id,
@@ -97,11 +97,52 @@ class NotebookClient:
                 logger.error(error_msg)
                 return error_msg
 
-            
+
             logger.info(f"Successfully created notebook '{notebook_name}' with ID: {response['id']}")
             return response
-            
+
         except Exception as e:
             error_msg = f"Error creating notebook '{notebook_name}': {str(e)}"
             logger.error(error_msg)
             return error_msg
+
+    async def update_notebook_definition(
+        self, workspace: str, notebook_id: str, content: str, notebook_name: str
+    ) -> Dict[str, Any]:
+        """Update the definition (content) of an existing notebook.
+
+        Args:
+            workspace: Name or ID of the workspace
+            notebook_id: ID of the notebook (must be a valid UUID)
+            content: The notebook content as JSON string
+            notebook_name: The name of the notebook (used for the ipynb filename)
+
+        Returns:
+            Dictionary with the update result or an error message string.
+        """
+        try:
+            workspace_name, workspace_id = await self.client.resolve_workspace_name_and_id(
+                workspace
+            )
+            if not workspace_id:
+                raise ValueError("Invalid workspace ID.")
+
+            if not _is_valid_uuid(notebook_id):
+                raise ValueError("Invalid notebook ID.")
+
+            logger.info(f"Updating notebook '{notebook_id}' in workspace '{workspace_name}' (ID: {workspace_id}).")
+
+            response = await self.client.update_notebook_definition(
+                workspace_id=workspace_id,
+                notebook_id=notebook_id,
+                content=content,
+                ipynb_name=notebook_name,
+            )
+
+            logger.info(f"Successfully updated notebook '{notebook_id}'")
+            return response
+
+        except Exception as e:
+            error_msg = f"Error updating notebook '{notebook_id}': {str(e)}"
+            logger.error(error_msg)
+            return {"error": error_msg}

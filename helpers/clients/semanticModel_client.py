@@ -9,20 +9,46 @@ class SemanticModelClient:
         self.client = client
 
     async def list_semantic_models(self, workspace_id: str):
-        """List all semantic models in a workspace."""
+        """List all semantic models in a workspace.
+
+        Args:
+            workspace_id: ID or name of the workspace
+
+        Returns:
+            List of semantic model dictionaries, or empty list if none found
+        """
+        # Resolve workspace name to ID if needed
+        workspace_id = await self.client.resolve_workspace(workspace_id)
+
         models = await self.client.get_semantic_models(workspace_id)
 
+        # Always return a list, even if empty
         if not models:
-            return f"No semantic models found in workspace '{workspace_id}'."
+            return []
 
         return models
 
     async def get_semantic_model(self, workspace_id: str, model_id: str):
-        """Get a specific semantic model by ID."""
+        """Get a specific semantic model by ID.
+
+        Args:
+            workspace_id: ID or name of the workspace
+            model_id: ID of the semantic model
+
+        Returns:
+            Semantic model dictionary, or None if not found
+        """
+        if not model_id:
+            raise ValueError("model_id is required")
+
+        # Resolve workspace name to ID if needed
+        workspace_id = await self.client.resolve_workspace(workspace_id)
+
         model = await self.client.get_semantic_model(workspace_id, model_id)
 
+        # Return None instead of string message for not found
         if not model:
-            return f"No semantic model found with ID '{model_id}' in workspace '{workspace_id}'."
+            return None
 
         return model
 

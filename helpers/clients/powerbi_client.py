@@ -464,3 +464,45 @@ class PowerBIClient:
             raise ValueError(f"Multiple reports found with name: {report}")
 
         return matching[0]["id"]
+
+    async def get_refresh_history(
+        self,
+        workspace_id: str,
+        dataset_id: str,
+        top: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Get the refresh history for a semantic model.
+
+        Args:
+            workspace_id: The workspace ID (GUID)
+            dataset_id: The dataset/semantic model ID (GUID)
+            top: Number of refresh entries to return (default: 10, max: 100)
+
+        Returns:
+            List of refresh history entries with:
+            - id: Refresh request ID
+            - refreshType: Type of refresh (Scheduled, OnDemand, ViaApi, etc.)
+            - startTime: When the refresh started (ISO 8601)
+            - endTime: When the refresh ended (ISO 8601)
+            - status: Completion status (Completed, Failed, Unknown, Disabled, Cancelled)
+            - serviceExceptionJson: Error details if failed
+        """
+        top = min(max(1, top), 100)  # Clamp between 1 and 100
+        url = self._build_url(f"datasets/{dataset_id}/refreshes?$top={top}", workspace_id)
+
+        try:
+            response = self._execute_with_retry(
+                lambda: requests.get(
+                    url,
+                    headers=self._get_headers(),
+                    timeout=60
+                )
+            )
+
+            response.raise_for_status()
+            data = response.json()
+            return data.get("value", [])
+
+        except requests.RequestException as e:
+            logger.error(f"Failed to get refresh history: {e}")
+            raise ValueError(f"Failed to get refresh history: {str(e)}")

@@ -13,10 +13,18 @@ class LakehouseClient:
         self.client = client
 
     async def list_lakehouses(self, workspace: str):
-        """List all lakehouses in a workspace."""
-        if not _is_valid_uuid(workspace):
-            raise ValueError("Invalid workspace ID.")
-        lakehouses = await self.client.get_lakehouses(workspace)
+        """List all lakehouses in a workspace.
+
+        Args:
+            workspace: ID or name of the workspace
+
+        Returns:
+            Markdown formatted string with list of lakehouses
+        """
+        # Resolve workspace name to ID if needed
+        workspace_id = await self.client.resolve_workspace(workspace)
+
+        lakehouses = await self.client.get_lakehouses(workspace_id)
 
         if not lakehouses:
             return f"No lakehouses found in workspace '{workspace}'."
@@ -35,15 +43,23 @@ class LakehouseClient:
         workspace: str,
         lakehouse: str,
     ) -> Optional[Dict[str, Any]]:
-        """Get details of a specific lakehouse including SQL endpoint properties."""
-        if not _is_valid_uuid(workspace):
-            raise ValueError("Invalid workspace ID.")
+        """Get details of a specific lakehouse including SQL endpoint properties.
 
+        Args:
+            workspace: ID or name of the workspace
+            lakehouse: ID or name of the lakehouse
+
+        Returns:
+            Lakehouse details dictionary, or None if not found
+        """
         if not lakehouse:
             raise ValueError("Lakehouse name cannot be empty.")
 
+        # Resolve workspace name to ID if needed
+        workspace_id = await self.client.resolve_workspace(workspace)
+
         response = await self.client.get_item(
-            workspace_id=workspace, item_id=lakehouse, item_type="Lakehouse"
+            workspace_id=workspace_id, item_id=lakehouse, item_type="Lakehouse"
         )
         logger.info(f"Lakehouse details: {response}")
         return response
@@ -60,15 +76,24 @@ class LakehouseClient:
         workspace: str,
         description: Optional[str] = None,
     ):
-        """Create a new lakehouse."""
-        if not _is_valid_uuid(workspace):
-            raise ValueError("Invalid workspace ID.")
+        """Create a new lakehouse.
 
+        Args:
+            name: Name for the new lakehouse
+            workspace: ID or name of the workspace
+            description: Optional description for the lakehouse
+
+        Returns:
+            Created lakehouse details
+        """
         if not name:
             raise ValueError("Lakehouse name cannot be empty.")
 
+        # Resolve workspace name to ID if needed
+        workspace_id = await self.client.resolve_workspace(workspace)
+
         return await self.client.create_item(
-            name=name, workspace=workspace, description="description", type="Lakehouse"
+            name=name, workspace=workspace_id, description=description or "", type="Lakehouse"
         )
 
     async def get_lakehouse_definition(
@@ -79,16 +104,17 @@ class LakehouseClient:
         The definition contains all configuration files including shortcuts.metadata.json.
 
         Args:
-            workspace_id: Workspace ID (UUID)
+            workspace_id: Workspace ID or name
             lakehouse_id: Lakehouse ID (UUID)
 
         Returns:
             Lakehouse definition with parts array containing file contents
         """
-        if not _is_valid_uuid(workspace_id):
-            raise ValueError("Invalid workspace ID.")
+        # Resolve workspace name to ID if needed
+        workspace_id = await self.client.resolve_workspace(workspace_id)
+
         if not _is_valid_uuid(lakehouse_id):
-            raise ValueError("Invalid lakehouse ID.")
+            raise ValueError("Invalid lakehouse ID - must be a UUID.")
 
         endpoint = f"workspaces/{workspace_id}/lakehouses/{lakehouse_id}/getDefinition"
         logger.info(f"Getting lakehouse definition for {lakehouse_id}")

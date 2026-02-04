@@ -24,20 +24,28 @@ async def list_reports(workspace: Optional[str] = None, ctx: Context = None) -> 
         A string containing the list of reports or an error message.
     """
     try:
+        # Get workspace from parameter or cache
+        ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
+        if not ws:
+            return "Error: No workspace specified and no workspace context set. Use set_workspace first or provide workspace parameter."
+
         client = ReportClient(
             FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
         )
 
-        reports = await client.list_reports(
-            workspace if workspace else __ctx_cache[f"{ctx.client_id}_workspace"]
-        )
+        reports = await client.list_reports(ws)
 
-        markdown = f"# Reports in workspace '{workspace}'\n\n"
+        if not reports:
+            return f"No reports found in workspace '{ws}'."
+
+        markdown = f"# Reports in workspace '{ws}'\n\n"
         markdown += "| ID | Name | Description |\n"
         markdown += "|-----|------|-------------|\n"
 
         for report in reports:
             markdown += f"| {report.get('id', 'N/A')} | {report.get('displayName', 'N/A')} | {report.get('description', 'N/A')} |\n"
+
+        markdown += f"\n*{len(reports)} report(s) found*"
 
         return markdown
 
@@ -55,24 +63,29 @@ async def get_report(
 
     Args:
         workspace: Name or ID of the workspace (optional)
-        report_id: ID of the report (optional)
+        report_id: ID of the report (required)
         ctx: Context object containing client information
 
     Returns:
         A string containing the report details or an error message.
     """
     try:
+        # Get workspace from parameter or cache
+        ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
+        if not ws:
+            return "Error: No workspace specified and no workspace context set. Use set_workspace first or provide workspace parameter."
+
+        if not report_id:
+            return "Error: report_id is required."
+
         client = ReportClient(
             FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
         )
 
-        report = await client.get_report(
-            workspace if workspace else __ctx_cache[f"{ctx.client_id}_workspace"],
-            report_id,
-        )
+        report = await client.get_report(ws, report_id)
 
         if not report:
-            return f"No report found with ID '{report_id}' in workspace '{workspace}'."
+            return f"No report found with ID '{report_id}' in workspace '{ws}'."
 
         return f"Report details:\n\n{report}"
 

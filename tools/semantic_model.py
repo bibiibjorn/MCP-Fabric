@@ -441,20 +441,28 @@ async def list_semantic_models(
         A string containing the list of semantic models or an error message.
     """
     try:
+        # Get workspace from parameter or cache
+        ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
+        if not ws:
+            return "Error: No workspace specified and no workspace context set. Use set_workspace first or provide workspace parameter."
+
         client = SemanticModelClient(
             FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
         )
 
-        models = await client.list_semantic_models(
-            workspace if workspace else __ctx_cache[f"{ctx.client_id}_workspace"]
-        )
+        models = await client.list_semantic_models(ws)
 
-        markdown = f"# Semantic Models in workspace '{workspace}'\n\n"
+        if not models:
+            return f"No semantic models found in workspace '{ws}'."
+
+        markdown = f"# Semantic Models in workspace '{ws}'\n\n"
         markdown += "| ID | Name | Folder ID | Description |\n"
         markdown += "|-----|------|-----------|-------------|\n"
 
         for model in models:
             markdown += f"| {model.get('id', 'N/A')} | {model.get('displayName', 'N/A')} | {model.get('folderId', 'N/A')} | {model.get('description', 'N/A')} |\n"
+
+        markdown += f"\n*{len(models)} semantic model(s) found*"
 
         return markdown
 
@@ -479,16 +487,26 @@ async def get_semantic_model(
         A string containing the details of the semantic model or an error message.
     """
     try:
+        # Get workspace from parameter or cache
+        ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
+        if not ws:
+            return "Error: No workspace specified and no workspace context set. Use set_workspace first or provide workspace parameter."
+
+        # Get model_id from parameter or cache
+        mid = model_id or __ctx_cache.get(f"{ctx.client_id}_semantic_model")
+        if not mid:
+            return "Error: No model_id specified and no semantic model context set. Use set_semantic_model first or provide model_id parameter."
+
         client = SemanticModelClient(
             FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
         )
 
-        model = await client.get_semantic_model(
-            workspace if workspace else __ctx_cache[f"{ctx.client_id}_workspace"],
-            model_id if model_id else __ctx_cache[f"{ctx.client_id}_semantic_model"],
-        )
+        model = await client.get_semantic_model(ws, mid)
 
-        return f"Semantic Model '{model['displayName']}' details:\n\n{model}"
+        if not model:
+            return f"No semantic model found with ID '{mid}' in workspace '{ws}'."
+
+        return f"Semantic Model '{model.get('displayName', 'Unknown')}' details:\n\n{model}"
 
     except Exception as e:
         return f"Error retrieving semantic model: {str(e)}"
@@ -1081,6 +1099,160 @@ async def get_semantic_model_measures(
     except Exception as e:
         logger.error(f"Error getting semantic model measures: {e}")
         return f"Error getting semantic model measures: {str(e)}"
+
+
+@mcp.tool()
+async def get_refresh_history(
+    workspace: Optional[str] = None,
+    dataset: Optional[str] = None,
+    top: int = 10,
+    ctx: Context = None
+) -> str:
+    """Get the refresh history for a semantic model.
+
+    Shows recent refresh operations including their status, timing, and any errors.
+    Useful for monitoring refresh health and troubleshooting failed refreshes.
+
+    Args:
+        workspace: Workspace name or ID (uses context if not provided)
+        dataset: Dataset/semantic model name or ID (uses context if not provided)
+        top: Number of refresh entries to return (default: 10, max: 100)
+        ctx: Context object
+
+    Returns:
+        Refresh history with:
+        - Refresh type (Scheduled, OnDemand, ViaApi, ViaEnhancedApi)
+        - Start and end times
+        - Status (Completed, Failed, Unknown, Disabled, Cancelled)
+        - Duration
+        - Error details for failed refreshes
+
+    Examples:
+        get_refresh_history()  # Last 10 refreshes for current model
+        get_refresh_history(top=25)  # Last 25 refreshes
+        get_refresh_history(dataset="Sales Model")  # Specific model
+
+    Note:
+        Requires at least read permissions on the semantic model.
+    """
+    try:
+        credential = get_azure_credentials(ctx.client_id, __ctx_cache)
+        fabric_client = FabricApiClient(credential)
+        powerbi_client = PowerBIClient(credential)
+
+        # Resolve workspace
+        workspace_id = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
+        if not workspace_id:
+            return "Error: No workspace specified and no workspace context set. Use set_workspace first or provide workspace parameter."
+
+        workspace_id = await fabric_client.resolve_workspace(workspace_id)
+
+        # Resolve dataset
+        dataset_name = dataset or __ctx_cache.get(f"{ctx.client_id}_semantic_model_name")
+        dataset_id = dataset or __ctx_cache.get(f"{ctx.client_id}_semantic_model")
+        if not dataset_id:
+            return "Error: No dataset specified and no semantic model context set. Use set_semantic_model first or provide dataset parameter."
+
+        dataset_id = await powerbi_client.resolve_dataset_id(workspace_id, dataset_id, fabric_client)
+
+        # Get model name for display
+        if not dataset_name or dataset_name == dataset_id:
+            models = await fabric_client.get_semantic_models(workspace_id)
+            model_info = next((m for m in models if m.get("id") == dataset_id), {})
+            dataset_name = model_info.get("displayName", dataset_id)
+
+        logger.info(f"Getting refresh history for semantic model {dataset_id}")
+
+        # Get refresh history
+        refreshes = await powerbi_client.get_refresh_history(workspace_id, dataset_id, top)
+
+        if not refreshes:
+            return f"No refresh history found for semantic model '{dataset_name}'"
+
+        # Format as markdown
+        markdown = f"# Refresh History: {dataset_name}\n\n"
+        markdown += f"**{len(refreshes)} refresh(es) shown**\n\n"
+
+        markdown += "| Status | Type | Start Time | End Time | Duration |\n"
+        markdown += "|--------|------|------------|----------|----------|\n"
+
+        for refresh in refreshes:
+            status = refresh.get("status", "Unknown")
+            refresh_type = refresh.get("refreshType", "Unknown")
+            start_time = refresh.get("startTime", "N/A")
+            end_time = refresh.get("endTime", "N/A")
+
+            # Calculate duration if both times are available
+            duration = "N/A"
+            if start_time != "N/A" and end_time != "N/A":
+                try:
+                    from datetime import datetime
+                    # Parse ISO 8601 format
+                    start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                    end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+                    delta = end_dt - start_dt
+                    total_seconds = int(delta.total_seconds())
+                    if total_seconds < 60:
+                        duration = f"{total_seconds}s"
+                    elif total_seconds < 3600:
+                        minutes = total_seconds // 60
+                        seconds = total_seconds % 60
+                        duration = f"{minutes}m {seconds}s"
+                    else:
+                        hours = total_seconds // 3600
+                        minutes = (total_seconds % 3600) // 60
+                        duration = f"{hours}h {minutes}m"
+                except Exception:
+                    duration = "N/A"
+
+            # Format timestamps for readability
+            if start_time != "N/A":
+                start_time = start_time.replace("T", " ").replace("Z", " UTC")[:22]
+            if end_time != "N/A":
+                end_time = end_time.replace("T", " ").replace("Z", " UTC")[:22]
+
+            # Status emoji
+            status_icon = {
+                "Completed": "✓",
+                "Failed": "✗",
+                "Unknown": "?",
+                "Disabled": "⊘",
+                "Cancelled": "⊗"
+            }.get(status, "")
+
+            markdown += f"| {status_icon} {status} | {refresh_type} | {start_time} | {end_time} | {duration} |\n"
+
+        # Add error details for failed refreshes
+        failed_refreshes = [r for r in refreshes if r.get("status") == "Failed"]
+        if failed_refreshes:
+            markdown += "\n## Failed Refresh Details\n\n"
+            for refresh in failed_refreshes:
+                start_time = refresh.get("startTime", "Unknown time")
+                if start_time != "Unknown time":
+                    start_time = start_time.replace("T", " ").replace("Z", " UTC")[:22]
+
+                markdown += f"### Refresh at {start_time}\n\n"
+
+                # Parse error JSON if available
+                error_json = refresh.get("serviceExceptionJson")
+                if error_json:
+                    try:
+                        import json
+                        error_data = json.loads(error_json)
+                        error_code = error_data.get("errorCode", "Unknown")
+                        error_desc = error_data.get("errorDescription", "No description available")
+                        markdown += f"**Error Code:** {error_code}\n\n"
+                        markdown += f"**Description:** {error_desc}\n\n"
+                    except Exception:
+                        markdown += f"**Error:** {error_json}\n\n"
+                else:
+                    markdown += "*No error details available*\n\n"
+
+        return markdown
+
+    except Exception as e:
+        logger.error(f"Error getting refresh history: {e}")
+        return f"Error getting refresh history: {str(e)}"
 
 
 @mcp.tool()

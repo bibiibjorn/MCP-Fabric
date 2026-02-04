@@ -1,6 +1,6 @@
-from tools.workspace import set_workspace, list_workspaces
+from tools.workspace import set_workspace, list_workspaces, get_workspace_capacity
 from tools.warehouse import set_warehouse, list_warehouses
-from tools.lakehouse import set_lakehouse, list_lakehouses
+from tools.lakehouse import set_lakehouse, list_lakehouses, list_shortcuts
 from tools.table import (
     set_table,
     list_tables,
@@ -19,7 +19,7 @@ from tools.report import (
     get_report,
 )
 from tools.load_data import load_data_from_url
-from tools.notebook import list_notebooks, create_notebook
+from tools.notebook import list_notebooks, create_notebook, list_spark_jobs, get_job_details
 from tools.public_apis import (
     list_fabric_workloads,
     get_fabric_openapi_spec,
@@ -34,10 +34,12 @@ from tools.public_apis import (
 __all__ = [
     "set_workspace",
     "list_workspaces",
+    "get_workspace_capacity",
     "set_warehouse",
     "list_warehouses",
     "set_lakehouse",
     "list_lakehouses",
+    "list_shortcuts",
     "set_table",
     "list_tables",
     "get_lakehouse_table_schema",
@@ -52,6 +54,8 @@ __all__ = [
     "get_view_schema",
     "list_notebooks",
     "create_notebook",
+    "list_spark_jobs",
+    "get_job_details",
     # Public APIs tools
     "list_fabric_workloads",
     "get_fabric_openapi_spec",

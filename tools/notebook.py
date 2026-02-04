@@ -5,9 +5,11 @@ from helpers.clients import (
     FabricApiClient,
     NotebookClient,
 )
+from helpers.clients.spark_client import SparkClient
 from helpers.utils import _is_valid_uuid
 import json
 from helpers.logging_config import get_logger
+from datetime import datetime
 
 
 from typing import Optional, Dict, List, Any
@@ -1531,3 +1533,232 @@ async def analyze_notebook_performance(
     except Exception as e:
         logger.error(f"Error analyzing notebook performance: {str(e)}")
         return f"Error analyzing notebook performance: {str(e)}"
+
+
+@mcp.tool()
+async def list_spark_jobs(
+    workspace: Optional[str] = None,
+    notebook: Optional[str] = None,
+    state: Optional[str] = None,
+    ctx: Context = None
+) -> str:
+    """List Spark job executions (Livy sessions).
+
+    Lists Spark jobs running in a workspace or specific notebook. Jobs represent
+    notebook executions and their current state.
+
+    Args:
+        workspace: Workspace name or ID (optional - uses context if not provided)
+        notebook: Notebook name or ID (optional - if omitted, lists all workspace jobs)
+        state: Filter by job state: NotStarted, InProgress, Cancelled, Failed, Succeeded (optional)
+        ctx: Context object containing client information
+
+    Returns:
+        Formatted list of Spark jobs with status, runtime, and submitter information
+    """
+    try:
+        if ctx is None:
+            raise ValueError("Context (ctx) must be provided.")
+
+        fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+        spark_client = SparkClient(fabric_client)
+
+        # Resolve workspace
+        ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
+        if not ws:
+            return "Workspace not set. Please set a workspace using 'set_workspace' command."
+
+        workspace_id = await fabric_client.resolve_workspace(ws)
+
+        # Build filters
+        filters = {}
+        if state:
+            filters["state"] = state
+
+        # Get sessions
+        if notebook:
+            # Resolve notebook ID if name provided
+            if not _is_valid_uuid(notebook):
+                notebook_id = await fabric_client.resolve_item_id(
+                    item=notebook, type="Notebook", workspace=workspace_id
+                )
+            else:
+                notebook_id = notebook
+
+            sessions = await spark_client.list_notebook_sessions(workspace_id, notebook_id)
+        else:
+            sessions = await spark_client.list_workspace_sessions(workspace_id, filters)
+
+        if not sessions:
+            filter_msg = f" with state '{state}'" if state else ""
+            notebook_msg = f" for notebook '{notebook}'" if notebook else ""
+            return f"No Spark jobs found{notebook_msg}{filter_msg} in workspace '{ws}'."
+
+        # Format as markdown table
+        markdown = f"# Spark Jobs in workspace '{ws}'\n\n"
+        if notebook:
+            markdown = f"# Spark Jobs for notebook '{notebook}' in workspace '{ws}'\n\n"
+        if state:
+            markdown += f"**Filtered by state:** {state}\n\n"
+
+        markdown += "| Job ID | State | Submitted Time | Duration | Submitter |\n"
+        markdown += "|--------|-------|----------------|----------|----------|\n"
+
+        for session in sessions:
+            job_id = session.get("livyId", "N/A")
+            job_state = session.get("state", "Unknown")
+            submitted_time = session.get("submittedDateTime", "N/A")
+            submitter_id = session.get("submitter", {}).get("id", "N/A")
+
+            # Calculate duration if available
+            duration = "N/A"
+            if submitted_time != "N/A":
+                try:
+                    submitted_dt = datetime.fromisoformat(submitted_time.replace("Z", "+00:00"))
+                    end_time = session.get("endDateTime")
+                    if end_time:
+                        end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+                        duration_seconds = (end_dt - submitted_dt).total_seconds()
+                        duration = f"{int(duration_seconds // 60)}m {int(duration_seconds % 60)}s"
+                    elif job_state in ["InProgress", "NotStarted"]:
+                        now_dt = datetime.now(submitted_dt.tzinfo)
+                        duration_seconds = (now_dt - submitted_dt).total_seconds()
+                        duration = f"{int(duration_seconds // 60)}m {int(duration_seconds % 60)}s (running)"
+                except Exception:
+                    duration = "N/A"
+
+            # Add status emoji
+            status_emoji = {
+                "Succeeded": "✅",
+                "Failed": "❌",
+                "InProgress": "⏳",
+                "NotStarted": "⏸️",
+                "Cancelled": "🚫"
+            }.get(job_state, "")
+
+            markdown += f"| {job_id} | {status_emoji} {job_state} | {submitted_time} | {duration} | {submitter_id} |\n"
+
+        markdown += f"\n**Total jobs:** {len(sessions)}\n"
+
+        return markdown
+
+    except Exception as e:
+        logger.error(f"Error listing Spark jobs: {str(e)}")
+        return f"Error listing Spark jobs: {str(e)}"
+
+
+@mcp.tool()
+async def get_job_details(
+    job_id: str,
+    workspace: Optional[str] = None,
+    notebook: Optional[str] = None,
+    ctx: Context = None
+) -> str:
+    """Get detailed information about a specific Spark job execution.
+
+    Retrieves comprehensive details about a Spark job including execution status,
+    timing information, and configuration details.
+
+    Args:
+        job_id: Livy session ID (from list_spark_jobs)
+        workspace: Workspace name or ID (optional - uses context if not provided)
+        notebook: Notebook name or ID (required to get detailed logs)
+        ctx: Context object containing client information
+
+    Returns:
+        Detailed job information including logs, metrics, and execution details
+    """
+    try:
+        if ctx is None:
+            raise ValueError("Context (ctx) must be provided.")
+
+        if not notebook:
+            return "Error: 'notebook' parameter is required to get job details."
+
+        fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+        spark_client = SparkClient(fabric_client)
+
+        # Resolve workspace
+        ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
+        if not ws:
+            return "Workspace not set. Please set a workspace using 'set_workspace' command."
+
+        workspace_id = await fabric_client.resolve_workspace(ws)
+
+        # Resolve notebook ID
+        if not _is_valid_uuid(notebook):
+            notebook_id = await fabric_client.resolve_item_id(
+                item=notebook, type="Notebook", workspace=workspace_id
+            )
+        else:
+            notebook_id = notebook
+
+        # Get session details
+        session = await spark_client.get_session_details(workspace_id, notebook_id, job_id)
+
+        if not session:
+            return f"No job found with ID '{job_id}' for notebook '{notebook}' in workspace '{ws}'."
+
+        # Format detailed information
+        markdown = f"# Spark Job Details\n\n"
+        markdown += f"**Job ID:** {session.get('livyId', 'N/A')}\n"
+        markdown += f"**Workspace:** {ws}\n"
+        markdown += f"**Notebook:** {notebook}\n\n"
+
+        # Status information
+        state = session.get('state', 'Unknown')
+        status_emoji = {
+            "Succeeded": "✅",
+            "Failed": "❌",
+            "InProgress": "⏳",
+            "NotStarted": "⏸️",
+            "Cancelled": "🚫"
+        }.get(state, "")
+
+        markdown += f"## Status\n"
+        markdown += f"**State:** {status_emoji} {state}\n"
+
+        # Timing information
+        submitted = session.get('submittedDateTime', 'N/A')
+        started = session.get('startDateTime', 'N/A')
+        ended = session.get('endDateTime', 'N/A')
+
+        markdown += f"\n## Timing\n"
+        markdown += f"**Submitted:** {submitted}\n"
+        markdown += f"**Started:** {started}\n"
+        markdown += f"**Ended:** {ended}\n"
+
+        # Calculate duration
+        if submitted != 'N/A' and ended != 'N/A':
+            try:
+                submitted_dt = datetime.fromisoformat(submitted.replace("Z", "+00:00"))
+                ended_dt = datetime.fromisoformat(ended.replace("Z", "+00:00"))
+                duration_seconds = (ended_dt - submitted_dt).total_seconds()
+                markdown += f"**Total Duration:** {int(duration_seconds // 60)}m {int(duration_seconds % 60)}s\n"
+            except Exception:
+                pass
+
+        # Submitter information
+        submitter = session.get('submitter', {})
+        markdown += f"\n## Submitter\n"
+        markdown += f"**ID:** {submitter.get('id', 'N/A')}\n"
+        markdown += f"**Type:** {submitter.get('type', 'N/A')}\n"
+
+        # Configuration
+        markdown += f"\n## Configuration\n"
+        markdown += f"**Artifact ID:** {session.get('artifactId', 'N/A')}\n"
+        markdown += f"**Workspace ID:** {session.get('workspaceId', 'N/A')}\n"
+
+        # Error information if failed
+        if state == "Failed":
+            errors = session.get('errors', [])
+            if errors:
+                markdown += f"\n## Errors\n"
+                for error in errors:
+                    markdown += f"- **{error.get('errorCode', 'Unknown')}:** {error.get('message', 'No message')}\n"
+
+        return markdown
+
+    except Exception as e:
+        logger.error(f"Error getting job details: {str(e)}")
+        return f"Error getting job details: {str(e)}"

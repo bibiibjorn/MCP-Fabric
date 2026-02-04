@@ -20,6 +20,10 @@ class FabricApiConfig(BaseModel):
 
     base_url: str = "https://api.fabric.microsoft.com/v1"
     max_results: int = 100
+    # Throttling/retry configuration (following Microsoft best practices)
+    max_retries: int = 3
+    default_retry_after: int = 60  # Default wait time if no Retry-After header
+    enable_exponential_backoff: bool = True
 
 
 class FabricApiClient:
@@ -53,6 +57,71 @@ class FabricApiClient:
             url += f"{separator}continuationToken={encoded_token}"
         return url
 
+    def _execute_with_retry(
+        self,
+        request_func,
+        max_retries: Optional[int] = None,
+    ) -> requests.Response:
+        """
+        Execute a request function with automatic retry on throttling (429 responses).
+
+        Implements Microsoft Fabric API best practices:
+        - Respects Retry-After header
+        - Uses exponential backoff for subsequent retries
+        - Logs throttling events for monitoring
+
+        Args:
+            request_func: A callable that returns a requests.Response
+            max_retries: Maximum number of retries (defaults to config value)
+
+        Returns:
+            The successful response
+
+        Raises:
+            requests.RequestException: If all retries are exhausted
+        """
+        import time
+
+        max_retries = max_retries or self.config.max_retries
+        retry_count = 0
+
+        while retry_count <= max_retries:
+            response = request_func()
+
+            if response.status_code == 429:  # Too Many Requests (Throttled)
+                if retry_count >= max_retries:
+                    logger.error(
+                        f"Request failed after {max_retries} retries due to throttling"
+                    )
+                    response.raise_for_status()
+
+                # Get Retry-After header (defaults to configured value)
+                retry_after = int(
+                    response.headers.get("Retry-After", self.config.default_retry_after)
+                )
+
+                # Apply exponential backoff if enabled
+                if self.config.enable_exponential_backoff and retry_count > 0:
+                    # Exponential: 2^retry_count * base_delay, capped at retry_after * 2
+                    backoff_multiplier = min(2 ** retry_count, 4)
+                    retry_after = min(retry_after * backoff_multiplier, retry_after * 2)
+
+                logger.warning(
+                    f"API throttled (429). Waiting {retry_after}s before retry "
+                    f"{retry_count + 1}/{max_retries}. "
+                    f"Consider reducing request frequency."
+                )
+
+                time.sleep(retry_after)
+                retry_count += 1
+                continue
+
+            # For non-throttling responses, return immediately
+            return response
+
+        # Should not reach here, but just in case
+        return response
+
     async def _make_request(
         self,
         endpoint: str,
@@ -79,24 +148,27 @@ class FabricApiClient:
             url = self._build_url(endpoint=endpoint)
             try:
                 if method.upper() == "POST":
-                    # logger.debug(f"Authorization header: {self._get_headers()}")
-                    # logger.debug(f"Request URL: {url}")
-                    # logger.debug(f"Request parameters: {params}")
-                    response = requests.post(
-                        url,
-                        headers=self._get_headers(),
-                        json=params,
-                        timeout=120,
+                    # Use retry wrapper for throttling protection
+                    response = self._execute_with_retry(
+                        lambda: requests.post(
+                            url,
+                            headers=self._get_headers(),
+                            json=params,
+                            timeout=120,
+                        )
                     )
                 else:
                     if "maxResults" not in params:
                         params["maxResults"] = self.config.max_results
-                    response = requests.request(
-                        method=method.upper(),
-                        url=url,
-                        headers=self._get_headers(),
-                        params=params,
-                        timeout=120,
+                    # Use retry wrapper for throttling protection
+                    response = self._execute_with_retry(
+                        lambda url=url, params=params: requests.request(
+                            method=method.upper(),
+                            url=url,
+                            headers=self._get_headers(),
+                            params=params,
+                            timeout=120,
+                        )
                     )
     
                 # LRO support: check for 202 and Operation-Location or Location header
@@ -129,8 +201,11 @@ class FabricApiClient:
                     logger.info(f"LRO: Polling {op_url} for operation status...")
                     start_time = time.time()
                     while True:
-                        poll_resp = requests.get(
-                            op_url, headers=self._get_headers(), timeout=60
+                        # Use retry wrapper for LRO polling (throttling protection)
+                        poll_resp = self._execute_with_retry(
+                            lambda: requests.get(
+                                op_url, headers=self._get_headers(), timeout=60
+                            )
                         )
                         if poll_resp.status_code not in (200, 201, 202):
                             logger.error(
@@ -153,8 +228,11 @@ class FabricApiClient:
                             if "/operations/" in op_url:
                                 result_url = op_url.rstrip("/") + "/result"
                                 logger.info(f"LRO: Fetching result from {result_url}")
-                                result_resp = requests.get(
-                                    result_url, headers=self._get_headers(), timeout=60
+                                # Use retry wrapper for result fetch (throttling protection)
+                                result_resp = self._execute_with_retry(
+                                    lambda: requests.get(
+                                        result_url, headers=self._get_headers(), timeout=60
+                                    )
                                 )
                                 if result_resp.status_code == 200:
                                     return result_resp.json()
@@ -183,6 +261,8 @@ class FabricApiClient:
                     logger.error(f"Response content: {e.response.text}")
                 return None
         else:
+            # Paginated request - implements Microsoft Fabric pagination best practices
+            # using continuationToken pattern
             results = []
             continuation_token = None
             while True:
@@ -194,21 +274,27 @@ class FabricApiClient:
                 request_params.pop("continuationToken", None)
                 try:
                     if method.upper() == "POST":
-                        response = requests.post(
-                            url,
-                            headers=self._get_headers(),
-                            json=request_params,
-                            timeout=120,
+                        # Use retry wrapper for throttling protection
+                        response = self._execute_with_retry(
+                            lambda url=url, request_params=request_params: requests.post(
+                                url,
+                                headers=self._get_headers(),
+                                json=request_params,
+                                timeout=120,
+                            )
                         )
                     else:
                         if "maxResults" not in request_params:
                             request_params["maxResults"] = self.config.max_results
-                        response = requests.request(
-                            method=method.upper(),
-                            url=url,
-                            headers=self._get_headers(),
-                            params=request_params,
-                            timeout=120,
+                        # Use retry wrapper for throttling protection
+                        response = self._execute_with_retry(
+                            lambda url=url, request_params=request_params: requests.request(
+                                method=method.upper(),
+                                url=url,
+                                headers=self._get_headers(),
+                                params=request_params,
+                                timeout=120,
+                            )
                         )
                     response.raise_for_status()
                     data = response.json()

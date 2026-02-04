@@ -4,7 +4,7 @@ from helpers.clients.table_client import TableClient
 from helpers.clients.workspace_client import WorkspaceClient
 from helpers.clients.semanticModel_client import SemanticModelClient
 from helpers.clients.report_client import ReportClient
-from helpers.clients.fabric_client import FabricApiClient
+from helpers.clients.fabric_client import FabricApiClient, FabricApiConfig
 from helpers.clients.sql_client import SQLClient, get_sql_endpoint
 from helpers.clients.notebook_client import NotebookClient
 
@@ -15,6 +15,7 @@ __all__ = [
     "TableClient",
     "WorkspaceClient",
     "FabricApiClient",
+    "FabricApiConfig",
     "SemanticModelClient",
     "ReportClient",
     "NotebookClient",

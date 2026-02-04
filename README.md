@@ -486,6 +486,57 @@ Clear current session context.
 clear_context()
 ```
 
+### **13. Public APIs & Best Practices (NEW)**
+
+Access Microsoft Fabric API documentation, best practices, and schemas without connecting to live environments.
+
+#### `list_fabric_workloads`
+List all available Fabric workload types with API specifications.
+```python
+list_fabric_workloads()
+# Returns: lakehouse, notebook, semanticModel, dataPipeline, etc. (47+ workloads)
+```
+
+#### `get_fabric_openapi_spec`
+Get the complete OpenAPI/Swagger specification for a workload.
+```python
+get_fabric_openapi_spec(workload_type="lakehouse")
+# Returns: Full OpenAPI spec with endpoints, parameters, schemas
+```
+
+#### `get_fabric_platform_api`
+Get platform-level APIs (workspaces, items, LRO operations).
+```python
+get_fabric_platform_api()
+```
+
+#### `list_fabric_best_practices` / `get_fabric_best_practices`
+Access best practices documentation for Fabric development.
+```python
+list_fabric_best_practices()
+# Topics: throttling, admin-apis, pagination, long-running-operation
+
+get_fabric_best_practices(topic="throttling")
+# Returns: Complete guide with code examples in Python, C#, TypeScript
+```
+
+#### `list_fabric_item_definitions` / `get_fabric_item_definition`
+Get JSON schema definitions for Fabric item types.
+```python
+list_fabric_item_definitions()
+# Returns: 35+ item types with schemas
+
+get_fabric_item_definition(workload_type="lakehouse")
+# Returns: Schema, definition parts, examples for lakehouse items
+```
+
+#### `get_fabric_api_examples`
+Get example API request/response payloads.
+```python
+get_fabric_api_examples(workload_type="lakehouse")
+# Returns: CreateLakehouse, GetLakehouse, ListTables examples with JSON payloads
+```
+
 ## 📊 PySpark Templates
 
 ### **Basic Templates**

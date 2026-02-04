@@ -26,7 +26,7 @@ def get_sqlalchemy_connection_string(driver: str, server: str, database: str) ->
     Returns:
         Engine: A SQLAlchemy engine object.
     """
-    connection_string = f"Driver={{ODBC Driver 18 for SQL Server}};Server={sql_endpoint},1433;Database={database};Encrypt=Yes;TrustServerCertificate=No"
+    connection_string = f"Driver={{ODBC Driver 18 for SQL Server}};Server={server},1433;Database={database};Encrypt=Yes;TrustServerCertificate=No"
     params = urllib.parse.quote(connection_string)
     # authentication
     resource_url = "https://database.windows.net/.default"

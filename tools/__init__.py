@@ -7,6 +7,8 @@ from tools.table import (
     get_lakehouse_table_schema,
     get_all_lakehouse_schemas,
     run_query,
+    list_views,
+    get_view_schema,
 )
 from tools.semantic_model import (
     list_semantic_models,
@@ -18,6 +20,16 @@ from tools.report import (
 )
 from tools.load_data import load_data_from_url
 from tools.notebook import list_notebooks, create_notebook
+from tools.public_apis import (
+    list_fabric_workloads,
+    get_fabric_openapi_spec,
+    get_fabric_platform_api,
+    get_fabric_best_practices,
+    list_fabric_best_practices,
+    get_fabric_item_definition,
+    list_fabric_item_definitions,
+    get_fabric_api_examples,
+)
 
 __all__ = [
     "set_workspace",
@@ -36,6 +48,17 @@ __all__ = [
     "get_report",
     "load_data_from_url",
     "run_query",
+    "list_views",
+    "get_view_schema",
     "list_notebooks",
     "create_notebook",
+    # Public APIs tools
+    "list_fabric_workloads",
+    "get_fabric_openapi_spec",
+    "get_fabric_platform_api",
+    "get_fabric_best_practices",
+    "list_fabric_best_practices",
+    "get_fabric_item_definition",
+    "list_fabric_item_definitions",
+    "get_fabric_api_examples",
 ]

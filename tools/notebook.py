@@ -1912,7 +1912,10 @@ async def get_job_details(
         logger.debug(f"Raw session data: {json.dumps(session, indent=2, default=str)}")
 
         # Enrich session with resolved names (capacity name, workspace name, etc.)
-        session = await spark_client.enrich_session_with_names(session)
+        try:
+            session = await spark_client.enrich_session_with_names(session)
+        except Exception as e:
+            logger.warning(f"Failed to enrich session with names: {e}")
 
         # Get notebook metadata to get the display name
         notebook_client = NotebookClient(fabric_client)
@@ -1928,26 +1931,7 @@ async def get_job_details(
         # Get item info from session
         item_info = session.get('item', {})
         item_id = item_info.get('id', notebook_id)
-
-        # Format detailed information
-        markdown = f"# Spark Job Details\n\n"
-
-        # Basic Information
-        markdown += f"## Basic Information\n"
-        markdown += f"| Field | Value |\n"
-        markdown += f"|-------|-------|\n"
-        markdown += f"| **Livy ID** | `{session.get('livyId', job_id)}` |\n"
-        markdown += f"| **Livy Name** | {session.get('livyName', 'N/A')} |\n"
-        markdown += f"| **Workspace** | {ws} |\n"
-        markdown += f"| **Item Name** | {notebook_name} |\n"
-        markdown += f"| **Item ID** | `{item_id}` |\n"
-        markdown += f"| **Item Type** | {session.get('itemType', 'Notebook')} |\n"
-
         job_instance_id = session.get('jobInstanceId')
-        markdown += f"| **Job Instance ID** | `{job_instance_id or 'N/A'}` |\n"
-        markdown += f"| **Job Type** | {session.get('jobType', 'N/A')} |\n"
-        markdown += f"| **Operation** | {session.get('operationName', 'N/A')} |\n"
-        markdown += f"| **Origin** | {session.get('origin', 'N/A')} |\n"
 
         # Status information
         state = session.get('state', 'Unknown')
@@ -1960,119 +1944,61 @@ async def get_job_details(
             "Unknown": "❓"
         }.get(state, "")
 
-        markdown += f"\n## Status\n"
-        markdown += f"**State:** {status_emoji} {state}\n"
-        markdown += f"**Attempt:** {session.get('attemptNumber', 1)} of {session.get('maxNumberOfAttempts', 1)}\n"
+        # Format detailed information
+        markdown = f"# Spark Job: {notebook_name}\n\n"
+        markdown += f"**Status:** {status_emoji} {state}\n"
+        markdown += f"**Operation:** {session.get('operationName', 'N/A')}\n"
+        markdown += f"**Workspace:** {ws}\n\n"
 
-        # Cancellation reason if applicable
-        if state == "Cancelled":
-            cancellation_reason = session.get('cancellationReason')
-            if cancellation_reason:
-                markdown += f"**Cancellation Reason:** {cancellation_reason}\n"
-
-        # Timing information
+        # Timing information - compact format
         submitted = session.get('submittedDateTime', 'N/A')
         started = session.get('startDateTime', 'N/A')
         ended = session.get('endDateTime', 'N/A')
+        total_duration = session.get('totalDuration')
 
-        markdown += f"\n## Timing\n"
-        markdown += f"| Phase | Timestamp |\n"
-        markdown += f"|-------|----------|\n"
+        markdown += f"## Timing\n"
+        markdown += f"| | |\n|---|---|\n"
         markdown += f"| Submitted | {submitted} |\n"
         markdown += f"| Started | {started} |\n"
         markdown += f"| Ended | {ended} |\n"
 
-        # Duration details from API
-        queued_duration = session.get('queuedDuration')
-        running_duration = session.get('runningDuration')
-        total_duration = session.get('totalDuration')
-
-        markdown += f"\n| Duration Type | Value |\n"
-        markdown += f"|---------------|-------|\n"
-        if queued_duration:
-            markdown += f"| Queued | {queued_duration} |\n"
-        if running_duration:
-            markdown += f"| Running | {running_duration} |\n"
+        # Show duration
         if total_duration:
-            markdown += f"| **Total** | **{total_duration}** |\n"
-
-        # Calculate duration if not provided by API
-        if not total_duration and submitted != 'N/A' and ended != 'N/A':
+            markdown += f"| **Duration** | **{total_duration}** |\n"
+        elif submitted != 'N/A' and ended != 'N/A':
             try:
                 submitted_dt = datetime.fromisoformat(submitted.replace("Z", "+00:00"))
                 ended_dt = datetime.fromisoformat(ended.replace("Z", "+00:00"))
                 duration_seconds = (ended_dt - submitted_dt).total_seconds()
                 mins = int(duration_seconds // 60)
                 secs = int(duration_seconds % 60)
-                markdown += f"| **Calculated Total** | **{mins}m {secs}s** |\n"
+                markdown += f"| **Duration** | **{mins}m {secs}s** |\n"
             except Exception:
                 pass
 
-        # Submitter information
+        # Submitter information - simplified
         submitter = session.get('submitter', {})
-        consumer = session.get('consumerId', {})
-        markdown += f"\n## Submitter\n"
-        markdown += f"| Field | Value |\n"
-        markdown += f"|-------|-------|\n"
-
-        submitter_id = submitter.get('id', 'N/A')
-        submitter_type = submitter.get('type', 'N/A')
-        # Display name might be in the principal object (check displayName, userPrincipalName, name)
         submitter_name = (
             submitter.get('displayName') or
             submitter.get('userPrincipalName') or
-            submitter.get('name') or
-            submitter.get('upn')
+            submitter.get('mail') or
+            submitter.get('name')
         )
-
         if submitter_name:
-            markdown += f"| **Submitter** | {submitter_name} |\n"
-        markdown += f"| Submitter ID | `{submitter_id}` |\n"
-        markdown += f"| Submitter Type | {submitter_type} |\n"
+            markdown += f"\n**Submitted by:** {submitter_name}\n"
+        elif submitter.get('id'):
+            markdown += f"\n**Submitted by:** `{submitter.get('id')}`\n"
 
-        if consumer and consumer.get('id'):
-            consumer_name = (
-                consumer.get('displayName') or
-                consumer.get('userPrincipalName') or
-                consumer.get('name')
-            )
-            if consumer_name:
-                markdown += f"| **Consumer** | {consumer_name} |\n"
-            markdown += f"| Consumer ID | `{consumer.get('id')}` |\n"
+        # Cancellation reason if applicable
+        if state == "Cancelled":
+            cancellation_reason = session.get('cancellationReason')
+            if cancellation_reason:
+                markdown += f"\n**Cancellation Reason:** {cancellation_reason}\n"
 
-        # Resource Configuration - always show this section
-        markdown += f"\n## Resource Configuration\n"
-        driver_memory = session.get('driverMemory')
-        driver_cores = session.get('driverCores')
-        executor_memory = session.get('executorMemory')
-        executor_cores = session.get('executorCores')
-        num_executors = session.get('numExecutors')
-        is_dynamic = session.get('isDynamicAllocationEnabled')
-        max_executors = session.get('dynamicAllocationMaxExecutors')
-        runtime_version = session.get('runtimeVersion')
-        is_high_concurrency = session.get('isHighConcurrency')
-
-        markdown += f"| Resource | Value |\n"
-        markdown += f"|----------|-------|\n"
-        markdown += f"| Driver Cores | {driver_cores if driver_cores is not None else 'N/A'} |\n"
-        markdown += f"| Driver Memory | {f'{driver_memory} GB' if driver_memory is not None else 'N/A'} |\n"
-        markdown += f"| Executor Cores | {executor_cores if executor_cores is not None else 'N/A'} |\n"
-        markdown += f"| Executor Memory | {f'{executor_memory} GB' if executor_memory is not None else 'N/A'} |\n"
-        markdown += f"| Num Executors | {num_executors if num_executors is not None else 'N/A'} |\n"
-        markdown += f"| Dynamic Allocation | {'Yes' if is_dynamic else 'No'} |\n"
-        if is_dynamic and max_executors:
-            markdown += f"| Max Executors | {max_executors} |\n"
-        markdown += f"| Runtime Version | {runtime_version or 'N/A'} |\n"
-        markdown += f"| High Concurrency | {'Yes' if is_high_concurrency else 'No'} |\n"
-
-        # Spark Application Information
+        # Spark Application link
         spark_app_id = session.get('sparkApplicationId')
-        markdown += f"\n## Spark Application\n"
         if spark_app_id:
-            markdown += f"**Spark Application ID:** `{spark_app_id}`\n"
-            markdown += f"**Spark UI:** [Open Spark UI](https://app.fabric.microsoft.com/groups/{workspace_id}/sparkapplication/{spark_app_id})\n"
-        else:
-            markdown += f"**Spark Application ID:** Not yet assigned (job may not have started or app ID not available)\n"
+            markdown += f"\n**Spark UI:** [Open Spark Application](https://app.fabric.microsoft.com/groups/{workspace_id}/sparkapplication/{spark_app_id})\n"
 
         # Error information if failed
         job_instance = None
@@ -2121,48 +2047,11 @@ async def get_job_details(
                 markdown += "\n⚠️ *No detailed error information available from the API.*\n"
                 markdown += "*Check the Spark logs in the Fabric portal for more details.*\n"
 
-        # Capacity and Workspace IDs - show names where available
-        markdown += f"\n## Infrastructure\n"
-        markdown += f"| Field | Value |\n"
-        markdown += f"|-------|-------|\n"
-
-        # Capacity - show name if resolved
-        capacity_id = session.get('capacityId', 'N/A')
-        capacity_name = session.get('capacityName')
-        if capacity_name and capacity_name != capacity_id:
-            markdown += f"| **Capacity** | {capacity_name} |\n"
-        markdown += f"| Capacity ID | `{capacity_id}` |\n"
-
-        # Workspace - show name if resolved
-        ws_id = session.get('workspaceId') or workspace_id
-        ws_name = session.get('workspaceName') or ws
-        if ws_name and ws_name != ws_id:
-            markdown += f"| **Workspace** | {ws_name} |\n"
-        markdown += f"| Workspace ID | `{ws_id}` |\n"
-
-        # Creator item (for high concurrency)
-        creator_item = session.get('creatorItem', {})
-        if creator_item and creator_item.get('id'):
-            markdown += f"| Creator Item ID | `{creator_item.get('id')}` |\n"
-
-        # Livy session item resource URI
-        livy_uri = session.get('livySessionItemResourceUri')
-        if livy_uri:
-            markdown += f"| Livy Session URI | `{livy_uri}` |\n"
-
-        # Monitoring Links
-        markdown += f"\n## 🔗 Monitoring Links\n"
-        markdown += f"- **Workspace:** [{ws}](https://app.fabric.microsoft.com/groups/{workspace_id})\n"
-        markdown += f"- **Notebook:** [{notebook_name}](https://app.fabric.microsoft.com/groups/{workspace_id}/notebooks/{notebook_id})\n"
-        if spark_app_id:
-            markdown += f"- **Spark UI:** [Open Spark Application](https://app.fabric.microsoft.com/groups/{workspace_id}/sparkapplication/{spark_app_id})\n"
+        # Links section
+        markdown += f"\n## Links\n"
+        markdown += f"- [Open Notebook](https://app.fabric.microsoft.com/groups/{workspace_id}/notebooks/{notebook_id})\n"
         if job_instance_id:
-            markdown += f"- **Monitoring Hub:** [View Job Run](https://app.fabric.microsoft.com/groups/{workspace_id}/monitoringhub?experience=fabric-developer&jobId={job_instance_id})\n"
-
-        # Debug: show raw session keys if verbose
-        markdown += f"\n<details>\n<summary>Raw API Fields Available</summary>\n\n"
-        markdown += f"```\n{', '.join(sorted(session.keys()))}\n```\n"
-        markdown += f"</details>\n"
+            markdown += f"- [View in Monitoring Hub](https://app.fabric.microsoft.com/groups/{workspace_id}/monitoringhub?experience=fabric-developer&jobId={job_instance_id})\n"
 
         return markdown
 

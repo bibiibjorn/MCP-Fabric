@@ -11,6 +11,7 @@ logger = get_logger(__name__)
 # Cache for ID-to-name lookups (shared across instances)
 _capacity_cache: Dict[str, str] = {}
 _workspace_cache: Dict[str, str] = {}
+_user_cache: Dict[str, Dict[str, str]] = {}  # user_id -> {displayName, userPrincipalName}
 
 
 class SparkClient:
@@ -218,6 +219,63 @@ class SparkClient:
 
         return _workspace_cache.get(workspace_id, workspace_id)
 
+    async def resolve_user_info(self, user_id: str) -> Dict[str, str]:
+        """
+        Resolve a user ID (Azure AD Object ID) to user display name and UPN using Microsoft Graph API.
+
+        Args:
+            user_id: User's Azure AD Object ID (UUID)
+
+        Returns:
+            Dict with 'displayName' and 'userPrincipalName', or empty dict if not found
+        """
+        global _user_cache
+
+        if not user_id:
+            return {}
+
+        # Check cache first
+        if user_id in _user_cache:
+            return _user_cache[user_id]
+
+        # Call Microsoft Graph API to get user info
+        try:
+            import requests
+
+            # Get token for Microsoft Graph
+            graph_token = self.client.credential.get_token("https://graph.microsoft.com/.default").token
+
+            headers = {
+                "Authorization": f"Bearer {graph_token}",
+                "Content-Type": "application/json"
+            }
+
+            # Get user by ID - request only the fields we need
+            graph_url = f"https://graph.microsoft.com/v1.0/users/{user_id}?$select=displayName,userPrincipalName,mail"
+
+            response = requests.get(graph_url, headers=headers, timeout=10)
+
+            if response.status_code == 200:
+                user_data = response.json()
+                user_info = {
+                    "displayName": user_data.get("displayName", ""),
+                    "userPrincipalName": user_data.get("userPrincipalName", ""),
+                    "mail": user_data.get("mail", "")
+                }
+                _user_cache[user_id] = user_info
+                return user_info
+            else:
+                logger.debug(f"Graph API returned {response.status_code} for user {user_id}")
+                # Cache empty result to avoid repeated failed lookups
+                _user_cache[user_id] = {}
+                return {}
+
+        except Exception as e:
+            logger.warning(f"Failed to resolve user info for {user_id}: {e}")
+            # Cache empty result to avoid repeated failed lookups
+            _user_cache[user_id] = {}
+            return {}
+
     async def enrich_session_with_names(self, session: Dict[str, Any]) -> Dict[str, Any]:
         """
         Enrich a session object by resolving IDs to human-readable names.
@@ -238,14 +296,56 @@ class SparkClient:
 
         enriched = session.copy()
 
-        # Resolve capacity name
-        capacity_id = session.get("capacityId")
-        if capacity_id:
-            enriched["capacityName"] = await self.resolve_capacity_name(capacity_id)
+        try:
+            # Resolve capacity name
+            capacity_id = session.get("capacityId")
+            if capacity_id:
+                try:
+                    enriched["capacityName"] = await self.resolve_capacity_name(capacity_id)
+                except Exception as e:
+                    logger.warning(f"Failed to resolve capacity name for {capacity_id}: {e}")
+                    enriched["capacityName"] = capacity_id
 
-        # Resolve workspace name (if workspaceId is present)
-        workspace_id = session.get("workspaceId")
-        if workspace_id:
-            enriched["workspaceName"] = await self.resolve_workspace_name(workspace_id)
+            # Resolve workspace name (if workspaceId is present)
+            workspace_id = session.get("workspaceId")
+            if workspace_id:
+                try:
+                    enriched["workspaceName"] = await self.resolve_workspace_name(workspace_id)
+                except Exception as e:
+                    logger.warning(f"Failed to resolve workspace name for {workspace_id}: {e}")
+                    enriched["workspaceName"] = workspace_id
+
+            # Resolve submitter user name
+            submitter = session.get("submitter", {})
+            if submitter and submitter.get("id") and submitter.get("type") == "User":
+                try:
+                    user_info = await self.resolve_user_info(submitter["id"])
+                    if user_info:
+                        # Add user info to the submitter object
+                        enriched_submitter = submitter.copy()
+                        enriched_submitter["displayName"] = user_info.get("displayName", "")
+                        enriched_submitter["userPrincipalName"] = user_info.get("userPrincipalName", "")
+                        enriched_submitter["mail"] = user_info.get("mail", "")
+                        enriched["submitter"] = enriched_submitter
+                except Exception as e:
+                    logger.warning(f"Failed to resolve submitter user info: {e}")
+
+            # Resolve consumer user name (if different from submitter)
+            consumer = session.get("consumerId", {})
+            if consumer and consumer.get("id") and consumer.get("type") == "User":
+                try:
+                    user_info = await self.resolve_user_info(consumer["id"])
+                    if user_info:
+                        enriched_consumer = consumer.copy()
+                        enriched_consumer["displayName"] = user_info.get("displayName", "")
+                        enriched_consumer["userPrincipalName"] = user_info.get("userPrincipalName", "")
+                        enriched["consumerId"] = enriched_consumer
+                except Exception as e:
+                    logger.warning(f"Failed to resolve consumer user info: {e}")
+
+        except Exception as e:
+            logger.warning(f"Failed to enrich session with names: {e}")
+            # Return original session if enrichment fails
+            return session
 
         return enriched

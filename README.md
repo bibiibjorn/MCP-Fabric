@@ -151,17 +151,23 @@ graph TB
    pip install -r requirements.txt
    ```
 
+## 🔐 Authentication
+
+The MCP server handles authentication **automatically** on first startup:
+
+1. **First run**: A browser window opens for Azure sign-in
+2. **Subsequent runs**: Cached credentials are used (stored in `~/.fabric_mcp_python/`)
+3. **Token refresh**: Automatic - if tokens expire, re-authentication happens seamlessly
+
+**No manual setup required** - just start the server and sign in when prompted.
+
+> **Note**: You need an Azure account with access to Microsoft Fabric workspaces.
+
 ## 🚀 Usage
 
-1. **Using STDIO**
+### **1. STDIO Mode (Recommended for Claude Desktop/VSCode)**
 
-### **Connect to Microsoft Fabric**
-
-```bash
-az login --scope https://api.fabric.microsoft.com/.default
-```
-
-### **Running with MCP Inspector**
+#### **Running with MCP Inspector**
 
 ```bash
 uv run --with mcp mcp dev fabric_mcp.py
@@ -618,10 +624,12 @@ LLM Response:
 ## 🔍 Troubleshooting
 
 ### **Common Issues**
-- **Authentication**: Ensure `az login` with correct scope
+
+- **Authentication**: Server auto-opens browser on first run. If auth fails, check Azure permissions for Fabric.
 - **Context**: Use `clear_context()` to reset session state
 - **Workspace**: Verify workspace names and permissions
 - **Templates**: Check available template types in documentation
+- **Skip auth**: Use `--skip-auth` flag if you need to bypass authentication check
 
 ### **Getting Help**
 - Use validation tools for code issues

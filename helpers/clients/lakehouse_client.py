@@ -33,14 +33,16 @@ class LakehouseClient:
         workspace: str,
         lakehouse: str,
     ) -> Optional[Dict[str, Any]]:
-        """Get details of a specific lakehouse."""
+        """Get details of a specific lakehouse including SQL endpoint properties."""
         if not _is_valid_uuid(workspace):
             raise ValueError("Invalid workspace ID.")
 
         if not lakehouse:
             raise ValueError("Lakehouse name cannot be empty.")
 
-        response = await self.client.get_item(workspace_id=workspace, item_id=lakehouse)
+        response = await self.client.get_item(
+            workspace_id=workspace, item_id=lakehouse, item_type="Lakehouse"
+        )
         logger.info(f"Lakehouse details: {response}")
         return response
 

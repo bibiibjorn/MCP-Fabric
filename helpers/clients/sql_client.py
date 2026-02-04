@@ -1,59 +1,58 @@
 import polars as pl
-from sqlalchemy import create_engine, Engine
-from itertools import chain, repeat
-import urllib
+import mssql_python
 import struct
 from typing import Optional
 from helpers.clients import FabricApiClient, LakehouseClient, WarehouseClient
 from helpers.utils.authentication import get_shared_credential, SQL_SCOPE
 
 
-# prepare connection string
-sql_endpoint = "lkxke5qat5vu7fpnluz5o7cnme-qlbrb7caj77uthvfhqdxwd5v54.datawarehouse.fabric.microsoft.com"
-database = "EDR_WAREHOUSE"
-DRIVER = "{{ODBC Driver 18 for SQL Server}}"
+# SQL_COPT_SS_ACCESS_TOKEN constant for token-based authentication
+SQL_COPT_SS_ACCESS_TOKEN = 1256
 
 
-def get_sqlalchemy_connection_string(driver: str, server: str, database: str) -> Engine:
+def get_access_token_struct() -> bytes:
     """
-    Constructs a SQLAlchemy connection string based on the provided parameters.
+    Get an access token for SQL authentication and pack it into the required format.
 
     Uses the shared credential from authentication.py to ensure the same
     cached auth is used for both REST API and SQL/TDS connections.
 
+    Returns:
+        bytes: The packed token structure for SQL_COPT_SS_ACCESS_TOKEN.
+    """
+    azure_credentials = get_shared_credential()
+    token = azure_credentials.get_token(SQL_SCOPE).token
+    # Encode token as UTF-16LE (Windows expects this format)
+    token_bytes = token.encode("utf-16-le")
+    # Pack as: 4-byte length (little-endian) + token bytes
+    token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+    return token_struct
+
+
+def get_mssql_connection(server: str, database: str) -> mssql_python.Connection:
+    """
+    Creates a connection to SQL Server using mssql-python (no ODBC driver required).
+
+    Uses token-based authentication with Microsoft Entra ID.
+
     Args:
-        driver (str): The database driver (e.g., 'mssql+pyodbc').
         server (str): The server address.
         database (str): The database name.
 
     Returns:
-        Engine: A SQLAlchemy engine object.
+        mssql_python.Connection: A database connection object.
     """
-    connection_string = f"Driver={{ODBC Driver 18 for SQL Server}};Server={server},1433;Database={database};Encrypt=Yes;TrustServerCertificate=No"
-    params = urllib.parse.quote(connection_string)
-    # authentication - use shared credential for unified auth
-    azure_credentials = get_shared_credential()
-    token_object = azure_credentials.get_token(SQL_SCOPE)
-    # Retrieve an access token
-    token_as_bytes = bytes(
-        token_object.token, "UTF-8"
-    )  # Convert the token to a UTF-8 byte string
-    encoded_bytes = bytes(
-        chain.from_iterable(zip(token_as_bytes, repeat(0)))
-    )  # Encode the bytes to a Windows byte string
-    token_bytes = (
-        struct.pack("<i", len(encoded_bytes)) + encoded_bytes
-    )  # Package the token into a bytes object
-    attrs_before = {
-        1256: token_bytes
-    }  # Attribute pointing to SQL_COPT_SS_ACCESS_TOKEN to pass access token to the driver
+    # Connection string without auth params (token is passed via attrs_before)
+    conn_str = f"Server={server};Database={database};Encrypt=Yes;TrustServerCertificate=No;"
 
-    # build the connection
-    engine = create_engine(
-        "mssql+pyodbc:///?odbc_connect={0}".format(params),
-        connect_args={"attrs_before": attrs_before},
+    # Get the packed access token
+    token_struct = get_access_token_struct()
+
+    # Connect using the mssql-python driver with token authentication
+    conn = mssql_python.connect(
+        conn_str, attrs_before={SQL_COPT_SS_ACCESS_TOKEN: token_struct}
     )
-    return engine
+    return conn
 
 
 async def get_sql_endpoint(
@@ -148,12 +147,55 @@ async def get_sql_endpoint(
 
 
 class SQLClient:
+    """
+    SQL Client for querying Fabric Lakehouses and Warehouses.
+
+    Uses mssql-python driver which does NOT require ODBC driver installation.
+    Authentication is handled via Microsoft Entra ID access tokens.
+    """
+
     def __init__(self, sql_endpoint: str, database: str):
-        self.engine = get_sqlalchemy_connection_string(DRIVER, sql_endpoint, database)
+        self.server = sql_endpoint
+        self.database = database
+        self._conn = None
+
+    def _get_connection(self) -> mssql_python.Connection:
+        """Get or create a connection."""
+        if self._conn is None:
+            self._conn = get_mssql_connection(self.server, self.database)
+        return self._conn
 
     def run_query(self, query: str) -> pl.DataFrame:
-        return pl.read_database(query, connection=self.engine)
+        """
+        Execute a SQL query and return results as a Polars DataFrame.
 
-    def load_data(self, df: pl.DataFrame, table_name: str, if_exists: str = "append"):
-        pdf = df.to_pandas()
-        pdf.to_sql(table_name, con=self.engine, if_exists=if_exists, index=False)
+        Args:
+            query: The SQL query to execute.
+
+        Returns:
+            pl.DataFrame: Query results as a Polars DataFrame.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(query)
+
+        # Fetch column names from cursor description
+        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+
+        # Fetch all rows
+        rows = cursor.fetchall()
+
+        # Convert to Polars DataFrame using dict-based approach
+        # This handles Row objects and tuples correctly regardless of column count
+        if rows:
+            data = [dict(zip(columns, row)) for row in rows]
+            return pl.DataFrame(data)
+        else:
+            # Return empty DataFrame with correct schema
+            return pl.DataFrame(schema={col: pl.Utf8 for col in columns})
+
+    def close(self):
+        """Close the connection."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None

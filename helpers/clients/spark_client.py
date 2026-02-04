@@ -92,3 +92,27 @@ class SparkClient:
         session = await self.client._make_request(endpoint=endpoint)
 
         return session
+
+    async def get_job_instance(
+        self, workspace_id: str, item_id: str, job_instance_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get detailed information about a job instance (execution details).
+
+        Args:
+            workspace_id: Workspace ID (UUID)
+            item_id: Item ID (Notebook, Spark Job Definition, etc.)
+            job_instance_id: Job instance ID from Livy session
+
+        Returns:
+            Job instance details including failure information or None if not found
+        """
+        endpoint = f"workspaces/{workspace_id}/items/{item_id}/jobs/instances/{job_instance_id}"
+        logger.info(f"Getting job instance details for {job_instance_id}")
+
+        try:
+            job_instance = await self.client._make_request(endpoint=endpoint)
+            return job_instance
+        except Exception as e:
+            logger.warning(f"Failed to get job instance details: {str(e)}")
+            return None

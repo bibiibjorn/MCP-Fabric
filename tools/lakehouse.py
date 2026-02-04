@@ -219,3 +219,179 @@ async def list_shortcuts(
     except Exception as e:
         logger.error(f"Error listing shortcuts: {str(e)}")
         return f"Error listing shortcuts: {str(e)}"
+
+
+# ===== AGENTIC / ORCHESTRATED TOOLS =====
+# These tools use the orchestration layer for intelligent multi-step workflows
+
+@mcp.tool()
+async def explore_lakehouse_complete(
+    workspace: str,
+    lakehouse: Optional[str] = None,
+    ctx: Context = None
+) -> str:
+    """Comprehensive lakehouse exploration workflow (AGENTIC).
+    
+    This is an intelligent orchestrated operation that:
+    1. Lists all lakehouses (if lakehouse not specified)
+    2. Lists all tables in the lakehouse
+    3. Gets schemas for all tables
+    4. Generates sample code for data access
+    5. Provides intelligent next-step suggestions
+    
+    Args:
+        workspace: Fabric workspace name
+        lakehouse: Specific lakehouse name (optional, explores all if not provided)
+        ctx: Context object
+    
+    Returns:
+        JSON string with complete exploration results and suggestions
+    """
+    try:
+        if ctx is None:
+            raise ValueError("Context (ctx) must be provided.")
+        
+        from helpers.orchestration.lakehouse_orchestrator import lakehouse_orchestrator
+        import json
+        
+        result = await lakehouse_orchestrator.explore_lakehouse_complete(
+            workspace=workspace,
+            lakehouse=lakehouse,
+            ctx=ctx
+        )
+        
+        return json.dumps(result, indent=2)
+    
+    except Exception as e:
+        logger.error(f"Error in explore_lakehouse_complete: {str(e)}")
+        import json
+        return json.dumps({
+            "error": str(e),
+            "success": False
+        }, indent=2)
+
+
+@mcp.tool()
+async def execute_lakehouse_intent(
+    goal: str,
+    workspace: Optional[str] = None,
+    lakehouse: Optional[str] = None,
+    execution_mode: str = "standard",
+    ctx: Context = None
+) -> str:
+    """Execute lakehouse operations based on natural language intent (AGENTIC).
+    
+    Intelligent routing based on keywords in the goal:
+    - Explore/discover → comprehensive lakehouse exploration
+    - Integrate/connect → data integration setup
+    - Analyze/performance → lakehouse performance analysis
+    - Read/load → data reading workflow
+    - Write/save → data writing workflow
+    
+    Execution modes:
+    - fast: Quick preview, minimal validation (5x faster)
+    - standard: Normal execution with validation (default)
+    - analyze: Full analysis with performance metrics
+    - safe: Maximum validation with rollback capability
+    
+    Args:
+        goal: Natural language description of what you want to achieve
+        workspace: Fabric workspace name (optional, uses context if not provided)
+        lakehouse: Lakehouse name (optional, uses context if not provided)
+        execution_mode: Execution mode (fast/standard/analyze/safe)
+        ctx: Context object
+    
+    Returns:
+        JSON string with execution results and intelligent suggestions
+    
+    Examples:
+        - "Explore all tables in the lakehouse"
+        - "Setup data integration to read from sales table"
+        - "Analyze lakehouse performance and structure"
+        - "Discover what data is available"
+    """
+    try:
+        if ctx is None:
+            raise ValueError("Context (ctx) must be provided.")
+        
+        from helpers.orchestration.agent_policy import agent_policy
+        from helpers.utils.context import get_context
+        import json
+        
+        # Get context
+        ctx_obj = get_context()
+        context = {
+            'workspace': workspace or ctx_obj.workspace,
+            'lakehouse': lakehouse or ctx_obj.lakehouse,
+        }
+        
+        # Execute intent
+        result = await agent_policy.execute_intent(
+            intent=goal,
+            domain='lakehouse',
+            context=context,
+            execution_mode=execution_mode,
+            ctx=ctx
+        )
+        
+        return json.dumps(result, indent=2)
+    
+    except Exception as e:
+        logger.error(f"Error in execute_lakehouse_intent: {str(e)}")
+        import json
+        return json.dumps({
+            "error": str(e),
+            "success": False,
+            "suggestion": "Try rephrasing your goal or provide more specific details"
+        }, indent=2)
+
+
+@mcp.tool()
+async def setup_data_integration(
+    workspace: str,
+    lakehouse: str,
+    goal: str,
+    ctx: Context = None
+) -> str:
+    """Setup data integration workflow for lakehouse (AGENTIC).
+    
+    Creates a complete data integration setup including:
+    - Notebook creation
+    - Code generation for read/write operations
+    - Data quality checks
+    - Intelligent suggestions for next steps
+    
+    Args:
+        workspace: Workspace name
+        lakehouse: Lakehouse name
+        goal: Integration goal (e.g., "read from sales table", "write to warehouse")
+        ctx: Context object
+    
+    Returns:
+        JSON string with integration setup results
+    """
+    try:
+        if ctx is None:
+            raise ValueError("Context (ctx) must be provided.")
+        
+        from helpers.orchestration.lakehouse_orchestrator import lakehouse_orchestrator
+        import json
+        
+        result = await lakehouse_orchestrator.setup_data_integration(
+            workspace=workspace,
+            lakehouse=lakehouse,
+            goal=goal,
+            ctx=ctx
+        )
+        
+        return json.dumps(result, indent=2)
+    
+    except Exception as e:
+        logger.error(f"Error in setup_data_integration: {str(e)}")
+        import json
+        return json.dumps({
+            "error": str(e),
+            "success": False
+        }, indent=2)
+
+

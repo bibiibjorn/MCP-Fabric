@@ -1586,6 +1586,10 @@ async def list_spark_jobs(
                 notebook_id = notebook
 
             sessions = await spark_client.list_notebook_sessions(workspace_id, notebook_id)
+
+            # Apply client-side filtering for notebook sessions (API doesn't support it)
+            if state and sessions:
+                sessions = [s for s in sessions if s.get("state") == state]
         else:
             sessions = await spark_client.list_workspace_sessions(workspace_id, filters)
 
@@ -1657,7 +1661,8 @@ async def get_job_details(
     """Get detailed information about a specific Spark job execution.
 
     Retrieves comprehensive details about a Spark job including execution status,
-    timing information, and configuration details.
+    timing information, error messages, input parameters, resource configuration,
+    and links to monitoring tools.
 
     Args:
         job_id: Livy session ID (from list_spark_jobs)
@@ -1666,7 +1671,8 @@ async def get_job_details(
         ctx: Context object containing client information
 
     Returns:
-        Detailed job information including logs, metrics, and execution details
+        Detailed job information including notebook name, error messages for failed jobs,
+        input parameters, Spark application ID, and monitoring URLs
     """
     try:
         if ctx is None:
@@ -1701,9 +1707,24 @@ async def get_job_details(
 
         # Format detailed information
         markdown = f"# Spark Job Details\n\n"
-        markdown += f"**Job ID:** {session.get('livyId', 'N/A')}\n"
+
+        # Basic Information
+        markdown += f"## Basic Information\n"
+        markdown += f"**Job ID (Livy ID):** {session.get('livyId', 'N/A')}\n"
         markdown += f"**Workspace:** {ws}\n"
-        markdown += f"**Notebook:** {notebook}\n\n"
+
+        # Notebook name from session
+        notebook_name = session.get('itemName', notebook)
+        markdown += f"**Notebook Name:** {notebook_name}\n"
+        markdown += f"**Notebook ID:** {session.get('item', {}).get('id', notebook_id)}\n"
+
+        # Job Instance ID for linking to DAG/Run
+        job_instance_id = session.get('jobInstanceId')
+        if job_instance_id:
+            markdown += f"**Job Instance ID:** {job_instance_id}\n"
+
+        markdown += f"**Job Type:** {session.get('jobType', 'N/A')}\n"
+        markdown += f"**Operation:** {session.get('operationName', 'N/A')}\n\n"
 
         # Status information
         state = session.get('state', 'Unknown')
@@ -1718,7 +1739,13 @@ async def get_job_details(
         markdown += f"## Status\n"
         markdown += f"**State:** {status_emoji} {state}\n"
 
-        # Timing information
+        # Cancellation reason if applicable
+        if state == "Cancelled":
+            cancellation_reason = session.get('cancellationReason')
+            if cancellation_reason:
+                markdown += f"**Cancellation Reason:** {cancellation_reason}\n"
+
+        # Timing information with detailed durations
         submitted = session.get('submittedDateTime', 'N/A')
         started = session.get('startDateTime', 'N/A')
         ended = session.get('endDateTime', 'N/A')
@@ -1728,13 +1755,25 @@ async def get_job_details(
         markdown += f"**Started:** {started}\n"
         markdown += f"**Ended:** {ended}\n"
 
-        # Calculate duration
-        if submitted != 'N/A' and ended != 'N/A':
+        # Duration details from API
+        queued_duration = session.get('queuedDuration')
+        running_duration = session.get('runningDuration')
+        total_duration = session.get('totalDuration')
+
+        if queued_duration:
+            markdown += f"**Queued Duration:** {queued_duration}\n"
+        if running_duration:
+            markdown += f"**Running Duration:** {running_duration}\n"
+        if total_duration:
+            markdown += f"**Total Duration:** {total_duration}\n"
+
+        # Calculate duration if not provided by API
+        if not total_duration and submitted != 'N/A' and ended != 'N/A':
             try:
                 submitted_dt = datetime.fromisoformat(submitted.replace("Z", "+00:00"))
                 ended_dt = datetime.fromisoformat(ended.replace("Z", "+00:00"))
                 duration_seconds = (ended_dt - submitted_dt).total_seconds()
-                markdown += f"**Total Duration:** {int(duration_seconds // 60)}m {int(duration_seconds % 60)}s\n"
+                markdown += f"**Calculated Duration:** {int(duration_seconds // 60)}m {int(duration_seconds % 60)}s\n"
             except Exception:
                 pass
 
@@ -1744,21 +1783,304 @@ async def get_job_details(
         markdown += f"**ID:** {submitter.get('id', 'N/A')}\n"
         markdown += f"**Type:** {submitter.get('type', 'N/A')}\n"
 
-        # Configuration
-        markdown += f"\n## Configuration\n"
-        markdown += f"**Artifact ID:** {session.get('artifactId', 'N/A')}\n"
-        markdown += f"**Workspace ID:** {session.get('workspaceId', 'N/A')}\n"
+        # Resource Configuration
+        markdown += f"\n## Resource Configuration\n"
+        driver_memory = session.get('driverMemory')
+        driver_cores = session.get('driverCores')
+        executor_memory = session.get('executorMemory')
+        executor_cores = session.get('executorCores')
+        num_executors = session.get('numExecutors')
 
-        # Error information if failed
+        if driver_memory or driver_cores:
+            markdown += f"**Driver:** {driver_cores or 'N/A'} cores, {driver_memory or 'N/A'} GB memory\n"
+        if executor_memory or executor_cores or num_executors:
+            markdown += f"**Executors:** {num_executors or 'N/A'} executors × {executor_cores or 'N/A'} cores × {executor_memory or 'N/A'} GB memory\n"
+
+        # Dynamic allocation
+        is_dynamic = session.get('isDynamicAllocationEnabled')
+        if is_dynamic:
+            max_executors = session.get('dynamicAllocationMaxExecutors')
+            markdown += f"**Dynamic Allocation:** Enabled (max {max_executors} executors)\n"
+
+        # Runtime and environment
+        runtime_version = session.get('runtimeVersion')
+        if runtime_version:
+            markdown += f"**Runtime Version:** {runtime_version}\n"
+
+        # High concurrency mode
+        is_high_concurrency = session.get('isHighConcurrency')
+        if is_high_concurrency:
+            markdown += f"**High Concurrency Mode:** Enabled\n"
+
+        # Spark Application Information
+        spark_app_id = session.get('sparkApplicationId')
+        if spark_app_id:
+            markdown += f"\n## Spark Application\n"
+            markdown += f"**Spark Application ID:** {spark_app_id}\n"
+            markdown += f"**Spark UI URL:** [View Spark UI](https://spark.fabric.microsoft.com/sparkui/{spark_app_id})\n"
+
+        # Error information if failed - Enhanced with job instance details
         if state == "Failed":
+            markdown += f"\n## Error Information\n"
+
+            # Try to get detailed error from job instance API
+            if job_instance_id:
+                job_instance = await spark_client.get_job_instance(workspace_id, notebook_id, job_instance_id)
+                if job_instance:
+                    failure_reason = job_instance.get('failureReason')
+                    if failure_reason:
+                        markdown += f"**Failure Reason:** {failure_reason}\n\n"
+
+                    # Include root activity ID for debugging
+                    root_activity_id = job_instance.get('rootActivityId')
+                    if root_activity_id:
+                        markdown += f"**Root Activity ID:** {root_activity_id}\n"
+
+            # Include any errors from the session response
             errors = session.get('errors', [])
             if errors:
-                markdown += f"\n## Errors\n"
+                markdown += f"\n**Error Details:**\n"
                 for error in errors:
-                    markdown += f"- **{error.get('errorCode', 'Unknown')}:** {error.get('message', 'No message')}\n"
+                    error_code = error.get('errorCode', 'Unknown')
+                    error_message = error.get('message', 'No message')
+                    error_source = error.get('source', '')
+
+                    markdown += f"- **{error_code}**"
+                    if error_source:
+                        markdown += f" (Source: {error_source})"
+                    markdown += f"\n  {error_message}\n"
+
+            # If no specific errors found, provide guidance
+            if not errors and not (job_instance_id and job_instance and job_instance.get('failureReason')):
+                markdown += "\n*No detailed error information available. Check the Spark logs for more details.*\n"
+
+        # Additional metadata
+        markdown += f"\n## Additional Information\n"
+        markdown += f"**Capacity ID:** {session.get('capacityId', 'N/A')}\n"
+        markdown += f"**Workspace ID:** {session.get('workspaceId', 'N/A')}\n"
+        markdown += f"**Origin:** {session.get('origin', 'N/A')}\n"
+        markdown += f"**Attempt Number:** {session.get('attemptNumber', 'N/A')} of {session.get('maxNumberOfAttempts', 'N/A')}\n"
+
+        # Monitoring Links
+        markdown += f"\n## Monitoring & Logs\n"
+        markdown += f"- **Job Instance ID:** `{job_instance_id or 'N/A'}`\n"
+        if spark_app_id:
+            markdown += f"- **Spark Application UI:** [Open UI](https://spark.fabric.microsoft.com/sparkui/{spark_app_id})\n"
+        markdown += f"- **Workspace:** [{ws}](https://app.fabric.microsoft.com/groups/{workspace_id})\n"
+        markdown += f"- **Notebook:** [{notebook_name}](https://app.fabric.microsoft.com/groups/{workspace_id}/notebooks/{notebook_id})\n"
 
         return markdown
 
     except Exception as e:
         logger.error(f"Error getting job details: {str(e)}")
         return f"Error getting job details: {str(e)}"
+
+
+# ===== AGENTIC / ORCHESTRATED TOOLS =====
+# These tools use the orchestration layer for intelligent multi-step workflows
+
+@mcp.tool()
+async def create_notebook_validated(
+    workspace: str,
+    notebook_name: str,
+    template_type: str = "basic",
+    validate: bool = True,
+    optimize: bool = False,
+    ctx: Context = None
+) -> str:
+    """Create a PySpark notebook with automatic validation and optimization (AGENTIC).
+    
+    This is an intelligent orchestrated operation that:
+    1. Creates notebook from template
+    2. Validates code (if validate=True)
+    3. Analyzes performance (if optimize=True)
+    4. Returns results with intelligent next-step suggestions
+    
+    Args:
+        workspace: Fabric workspace name
+        notebook_name: Name for the new notebook
+        template_type: Template type (basic/etl/analytics/ml/fabric_integration/streaming)
+        validate: Run validation after creation (default: True)
+        optimize: Run performance analysis (default: False)
+        ctx: Context object
+    
+    Returns:
+        JSON string with creation results, validation, and intelligent suggestions
+    """
+    try:
+        if ctx is None:
+            raise ValueError("Context (ctx) must be provided.")
+        
+        from helpers.orchestration.notebook_orchestrator import notebook_orchestrator
+        
+        result = await notebook_orchestrator.create_validated_notebook(
+            workspace=workspace,
+            notebook_name=notebook_name,
+            template_type=template_type,
+            validate=validate,
+            optimize=optimize,
+            ctx=ctx
+        )
+        
+        return json.dumps(result, indent=2)
+    
+    except Exception as e:
+        logger.error(f"Error in create_notebook_validated: {str(e)}")
+        return json.dumps({
+            "error": str(e),
+            "success": False
+        }, indent=2)
+
+
+@mcp.tool()
+async def execute_notebook_intent(
+    goal: str,
+    workspace: Optional[str] = None,
+    notebook_id: Optional[str] = None,
+    execution_mode: str = "standard",
+    ctx: Context = None
+) -> str:
+    """Execute notebook operations based on natural language intent (AGENTIC).
+    
+    Intelligent routing based on keywords in the goal:
+    - Create/build → create_pyspark_notebook workflow
+    - Validate/check → validate_pyspark_code workflow
+    - Optimize/improve → analyze_notebook_performance + optimization workflow
+    - Explore/analyze → comprehensive notebook analysis
+    
+    Execution modes:
+    - fast: Quick preview, minimal validation (5x faster)
+    - standard: Normal execution with validation (default)
+    - analyze: Full analysis with performance metrics (detailed insights)
+    - safe: Maximum validation with rollback capability (production-safe)
+    
+    Args:
+        goal: Natural language description of what you want to achieve
+        workspace: Fabric workspace name (optional, uses context if not provided)
+        notebook_id: Notebook ID (for existing notebooks, optional)
+        execution_mode: Execution mode (fast/standard/analyze/safe, default: standard)
+        ctx: Context object
+    
+    Returns:
+        JSON string with execution results and intelligent suggestions
+    
+    Examples:
+        - "Create a new ETL notebook and validate it"
+        - "Optimize my slow notebook"
+        - "Analyze the performance of my notebook"
+        - "Validate the notebook code for errors"
+    """
+    try:
+        if ctx is None:
+            raise ValueError("Context (ctx) must be provided.")
+        
+        from helpers.orchestration.agent_policy import agent_policy
+        from helpers.utils.context import get_context
+        
+        # Get context
+        ctx_obj = get_context()
+        context = {
+            'workspace': workspace or ctx_obj.workspace,
+            'notebook_id': notebook_id,
+        }
+        
+        # Execute intent
+        result = await agent_policy.execute_intent(
+            intent=goal,
+            domain='notebook',
+            context=context,
+            execution_mode=execution_mode,
+            ctx=ctx
+        )
+        
+        return json.dumps(result, indent=2)
+    
+    except Exception as e:
+        logger.error(f"Error in execute_notebook_intent: {str(e)}")
+        return json.dumps({
+            "error": str(e),
+            "success": False,
+            "suggestion": "Try rephrasing your goal or provide more specific details"
+        }, indent=2)
+
+
+@mcp.tool()
+async def get_notebook_suggestions(
+    notebook_id: str,
+    workspace: str,
+    ctx: Context = None
+) -> str:
+    """Get intelligent next-step suggestions for a notebook (AGENTIC).
+    
+    Analyzes the notebook and provides context-aware suggestions for:
+    - Code improvements
+    - Performance optimizations
+    - Best practices
+    - Next logical steps
+    
+    Args:
+        notebook_id: Notebook ID
+        workspace: Workspace name
+        ctx: Context object
+    
+    Returns:
+        JSON string with intelligent suggestions
+    """
+    try:
+        if ctx is None:
+            raise ValueError("Context (ctx) must be provided.")
+        
+        from helpers.orchestration.notebook_orchestrator import notebook_orchestrator
+        
+        result = await notebook_orchestrator.analyze_notebook_comprehensive(
+            notebook_id=notebook_id,
+            workspace=workspace,
+            ctx=ctx
+        )
+        
+        # Extract just the suggestions
+        return json.dumps({
+            "notebook_id": notebook_id,
+            "suggestions": result.get('suggested_next_actions', []),
+            "summary": result.get('summary', {}),
+            "workflow": "get_notebook_suggestions"
+        }, indent=2)
+    
+    except Exception as e:
+        logger.error(f"Error in get_notebook_suggestions: {str(e)}")
+        return json.dumps({
+            "error": str(e),
+            "success": False
+        }, indent=2)
+
+
+@mcp.tool()
+async def list_available_workflows(ctx: Context = None) -> str:
+    """List all available pre-defined workflows (AGENTIC).
+    
+    Returns information about intelligent workflow chains that can automate
+    multi-step operations like:
+    - Complete notebook development
+    - Lakehouse data exploration
+    - ETL pipeline setup
+    - ML notebook setup
+    - Performance optimization pipelines
+    
+    Returns:
+        JSON string with available workflows and their descriptions
+    """
+    try:
+        from helpers.orchestration.agent_policy import agent_policy
+        
+        workflows = agent_policy.get_available_workflows()
+        
+        return json.dumps(workflows, indent=2)
+    
+    except Exception as e:
+        logger.error(f"Error in list_available_workflows: {str(e)}")
+        return json.dumps({
+            "error": str(e),
+            "success": False
+        }, indent=2)
+
+

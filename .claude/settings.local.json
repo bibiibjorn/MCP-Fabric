@@ -11,7 +11,8 @@
       "WebFetch(domain:github.com)",
       "Bash(uv sync:*)",
       "Bash(uv run python:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(python:*)"
     ]
   }
 }

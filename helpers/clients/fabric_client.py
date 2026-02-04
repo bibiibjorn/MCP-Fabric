@@ -317,6 +317,17 @@ class FabricApiClient:
         """Get all available workspaces"""
         return await self._make_request("workspaces", use_pagination=True)
 
+    async def get_workspace(self, workspace_id: str) -> Dict:
+        """Get a specific workspace by ID
+
+        Args:
+            workspace_id: ID of the workspace
+
+        Returns:
+            A dictionary containing the workspace details or an error message.
+        """
+        return await self._make_request(f"workspaces/{workspace_id}")
+
     async def get_lakehouses(self, workspace_id: str) -> List[Dict]:
         """Get all lakehouses in a workspace"""
         return await self.get_items(workspace_id=workspace_id, item_type="Lakehouse")

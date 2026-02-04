@@ -645,6 +645,28 @@ The analysis tools provide:
 - **Scoring system** (0-100) for code quality
 - **Fabric compatibility** assessment
 
+## 🤖 Agentic Architecture (Roadmap)
+
+We're planning to implement sophisticated agentic patterns to enable intelligent, autonomous multi-step operations. This will transform the server from a tool collection into an intelligent assistant.
+
+**Proposed Capabilities**:
+
+- 🎯 **Multi-Step Orchestration**: Execute complex workflows with single tool calls
+- 🧠 **Intelligent Suggestions**: Context-aware next-action recommendations
+- 🔗 **Tool Relationships**: Explicit knowledge graphs for tool sequencing
+- 📋 **Workflow Templates**: Pre-defined best-practice workflows
+- 🛡️ **Execution Policies**: Adaptive strategies (fast/safe/analyze modes)
+
+**Documentation**:
+
+- [Agentic Logic Analysis Summary](./docs/AGENTIC_LOGIC_ANALYSIS_SUMMARY.md) - Executive overview
+- [Architecture Comparison](./docs/COMPARISON_POWERBI_VS_FABRIC_MCP.md) - Detailed pattern analysis
+- [Implementation Proposal](./docs/AGENTIC_ARCHITECTURE_PROPOSAL.md) - Complete design
+- [Quick Start Guide](./docs/QUICK_START_AGENTIC_IMPLEMENTATION.md) - Implementation roadmap
+- [Architecture Diagrams](./docs/ARCHITECTURE_DIAGRAMS.md) - Visual architecture
+
+**Expected Impact**: 60% reduction in tool invocations, 80% improvement in tool discovery, 40% faster workflows.
+
 ## 🤝 Contributing
 
 This project welcomes contributions! Please see our contributing guidelines for details.

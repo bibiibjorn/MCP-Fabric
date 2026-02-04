@@ -1554,7 +1554,7 @@ async def list_spark_jobs(
         ctx: Context object containing client information
 
     Returns:
-        Formatted list of Spark jobs with status, runtime, and submitter information
+        Formatted list of Spark jobs with status, runtime, item name, and submitter information
     """
     try:
         if ctx is None:
@@ -1605,30 +1605,43 @@ async def list_spark_jobs(
         if state:
             markdown += f"**Filtered by state:** {state}\n\n"
 
-        markdown += "| Job ID | State | Submitted Time | Duration | Submitter |\n"
-        markdown += "|--------|-------|----------------|----------|----------|\n"
+        markdown += "| Livy ID | Item Name | Type | State | Submitted | Duration | Operation |\n"
+        markdown += "|---------|-----------|------|-------|-----------|----------|----------|\n"
 
         for session in sessions:
             job_id = session.get("livyId", "N/A")
+            item_name = session.get("itemName", "N/A")
+            item_type = session.get("itemType", "N/A")
             job_state = session.get("state", "Unknown")
             submitted_time = session.get("submittedDateTime", "N/A")
-            submitter_id = session.get("submitter", {}).get("id", "N/A")
+            operation = session.get("operationName", "N/A")
 
-            # Calculate duration if available
-            duration = "N/A"
-            if submitted_time != "N/A":
+            # Format submitted time to be shorter
+            if submitted_time and submitted_time != "N/A":
                 try:
-                    submitted_dt = datetime.fromisoformat(submitted_time.replace("Z", "+00:00"))
-                    end_time = session.get("endDateTime")
-                    if end_time:
-                        end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
-                        duration_seconds = (end_dt - submitted_dt).total_seconds()
-                        duration = f"{int(duration_seconds // 60)}m {int(duration_seconds % 60)}s"
-                    elif job_state in ["InProgress", "NotStarted"]:
-                        now_dt = datetime.now(submitted_dt.tzinfo)
-                        duration_seconds = (now_dt - submitted_dt).total_seconds()
-                        duration = f"{int(duration_seconds // 60)}m {int(duration_seconds % 60)}s (running)"
+                    dt = datetime.fromisoformat(submitted_time.replace("Z", "+00:00"))
+                    submitted_time = dt.strftime("%Y-%m-%d %H:%M")
                 except Exception:
+                    pass
+
+            # Calculate duration - prefer API duration, fallback to calculation
+            duration = session.get("totalDuration")
+            if not duration:
+                if submitted_time != "N/A":
+                    try:
+                        submitted_dt = datetime.fromisoformat(session.get("submittedDateTime", "").replace("Z", "+00:00"))
+                        end_time = session.get("endDateTime")
+                        if end_time:
+                            end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+                            duration_seconds = (end_dt - submitted_dt).total_seconds()
+                            duration = f"{int(duration_seconds // 60)}m {int(duration_seconds % 60)}s"
+                        elif job_state in ["InProgress", "NotStarted"]:
+                            now_dt = datetime.now(submitted_dt.tzinfo)
+                            duration_seconds = (now_dt - submitted_dt).total_seconds()
+                            duration = f"{int(duration_seconds // 60)}m {int(duration_seconds % 60)}s ⏳"
+                    except Exception:
+                        duration = "N/A"
+                else:
                     duration = "N/A"
 
             # Add status emoji
@@ -1637,18 +1650,208 @@ async def list_spark_jobs(
                 "Failed": "❌",
                 "InProgress": "⏳",
                 "NotStarted": "⏸️",
-                "Cancelled": "🚫"
+                "Cancelled": "🚫",
+                "Unknown": "❓"
             }.get(job_state, "")
 
-            markdown += f"| {job_id} | {status_emoji} {job_state} | {submitted_time} | {duration} | {submitter_id} |\n"
+            # Truncate job_id for display
+            short_job_id = str(job_id)[:8] + "..." if len(str(job_id)) > 12 else job_id
+
+            markdown += f"| `{short_job_id}` | {item_name} | {item_type} | {status_emoji} {job_state} | {submitted_time} | {duration} | {operation} |\n"
 
         markdown += f"\n**Total jobs:** {len(sessions)}\n"
+
+        # Add summary by state
+        state_counts = {}
+        for s in sessions:
+            st = s.get("state", "Unknown")
+            state_counts[st] = state_counts.get(st, 0) + 1
+
+        if len(state_counts) > 1:
+            markdown += "\n**By state:** "
+            markdown += ", ".join([f"{k}: {v}" for k, v in sorted(state_counts.items())])
+            markdown += "\n"
 
         return markdown
 
     except Exception as e:
         logger.error(f"Error listing Spark jobs: {str(e)}")
         return f"Error listing Spark jobs: {str(e)}"
+
+
+@mcp.tool()
+async def list_all_spark_jobs(
+    workspaces: Optional[str] = None,
+    state: Optional[str] = None,
+    item_type: Optional[str] = None,
+    limit: int = 50,
+    ctx: Context = None
+) -> str:
+    """List Spark jobs across multiple workspaces.
+
+    Lists all Spark jobs from specified workspaces or all accessible workspaces.
+    Useful for getting a global view of job executions across the organization.
+
+    Args:
+        workspaces: Comma-separated list of workspace names/IDs, or 'all' for all workspaces (default: all)
+        state: Filter by job state: NotStarted, InProgress, Cancelled, Failed, Succeeded (optional)
+        item_type: Filter by item type: Notebook, SparkJobDefinition, Lakehouse (optional)
+        limit: Maximum number of jobs to return per workspace (default: 50)
+        ctx: Context object containing client information
+
+    Returns:
+        Formatted list of Spark jobs across workspaces with status, runtime, and workspace information
+    """
+    try:
+        if ctx is None:
+            raise ValueError("Context (ctx) must be provided.")
+
+        fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+        spark_client = SparkClient(fabric_client)
+
+        # Get list of workspaces to query
+        if not workspaces or workspaces.lower() == 'all':
+            all_workspaces = await fabric_client.get_workspaces()
+            workspace_list = [(w.get('id'), w.get('displayName')) for w in all_workspaces]
+        else:
+            workspace_names = [w.strip() for w in workspaces.split(',')]
+            workspace_list = []
+            for ws_name in workspace_names:
+                try:
+                    ws_id = await fabric_client.resolve_workspace(ws_name)
+                    workspace_list.append((ws_id, ws_name))
+                except Exception as e:
+                    logger.warning(f"Could not resolve workspace '{ws_name}': {e}")
+
+        if not workspace_list:
+            return "No workspaces found or accessible."
+
+        # Collect jobs from all workspaces
+        all_jobs = []
+        workspace_errors = []
+
+        for ws_id, ws_name in workspace_list:
+            try:
+                filters = {}
+                if state:
+                    filters["state"] = state
+
+                sessions = await spark_client.list_workspace_sessions(ws_id, filters)
+
+                if sessions:
+                    # Apply item_type filter if specified
+                    if item_type:
+                        sessions = [s for s in sessions if s.get("itemType") == item_type]
+
+                    # Add workspace info to each session
+                    for s in sessions[:limit]:
+                        s['_workspace_id'] = ws_id
+                        s['_workspace_name'] = ws_name
+                        all_jobs.append(s)
+
+            except Exception as e:
+                workspace_errors.append(f"{ws_name}: {str(e)}")
+                logger.warning(f"Error fetching jobs from workspace '{ws_name}': {e}")
+
+        # Sort by submitted time (most recent first)
+        all_jobs.sort(key=lambda x: x.get('submittedDateTime', ''), reverse=True)
+
+        if not all_jobs:
+            filter_info = []
+            if state:
+                filter_info.append(f"state='{state}'")
+            if item_type:
+                filter_info.append(f"type='{item_type}'")
+            filter_msg = f" (filters: {', '.join(filter_info)})" if filter_info else ""
+            return f"No Spark jobs found across {len(workspace_list)} workspaces{filter_msg}."
+
+        # Format as markdown
+        markdown = f"# Spark Jobs Across Workspaces\n\n"
+        markdown += f"**Workspaces queried:** {len(workspace_list)}\n"
+        if state:
+            markdown += f"**State filter:** {state}\n"
+        if item_type:
+            markdown += f"**Item type filter:** {item_type}\n"
+        markdown += "\n"
+
+        markdown += "| Workspace | Item Name | Type | State | Submitted | Duration | Livy ID |\n"
+        markdown += "|-----------|-----------|------|-------|-----------|----------|--------|\n"
+
+        for session in all_jobs:
+            ws_name = session.get("_workspace_name", "Unknown")
+            item_name = session.get("itemName", "N/A")
+            item_type_val = session.get("itemType", "N/A")
+            job_state = session.get("state", "Unknown")
+            submitted_time = session.get("submittedDateTime", "N/A")
+            job_id = session.get("livyId", "N/A")
+
+            # Format submitted time
+            if submitted_time and submitted_time != "N/A":
+                try:
+                    dt = datetime.fromisoformat(submitted_time.replace("Z", "+00:00"))
+                    submitted_time = dt.strftime("%m-%d %H:%M")
+                except Exception:
+                    pass
+
+            # Get duration
+            duration = session.get("totalDuration", "N/A")
+
+            # Status emoji
+            status_emoji = {
+                "Succeeded": "✅",
+                "Failed": "❌",
+                "InProgress": "⏳",
+                "NotStarted": "⏸️",
+                "Cancelled": "🚫",
+                "Unknown": "❓"
+            }.get(job_state, "")
+
+            # Truncate IDs for display
+            short_job_id = str(job_id)[:8] + "..." if len(str(job_id)) > 12 else job_id
+            short_ws = ws_name[:15] + "..." if len(ws_name) > 18 else ws_name
+
+            markdown += f"| {short_ws} | {item_name} | {item_type_val} | {status_emoji} {job_state} | {submitted_time} | {duration} | `{short_job_id}` |\n"
+
+        markdown += f"\n**Total jobs:** {len(all_jobs)}\n"
+
+        # Summary statistics
+        state_counts = {}
+        workspace_counts = {}
+        type_counts = {}
+
+        for s in all_jobs:
+            st = s.get("state", "Unknown")
+            ws = s.get("_workspace_name", "Unknown")
+            it = s.get("itemType", "Unknown")
+
+            state_counts[st] = state_counts.get(st, 0) + 1
+            workspace_counts[ws] = workspace_counts.get(ws, 0) + 1
+            type_counts[it] = type_counts.get(it, 0) + 1
+
+        markdown += "\n## Summary\n"
+        markdown += "\n**By State:**\n"
+        for st, count in sorted(state_counts.items(), key=lambda x: -x[1]):
+            emoji = {"Succeeded": "✅", "Failed": "❌", "InProgress": "⏳", "NotStarted": "⏸️", "Cancelled": "🚫"}.get(st, "")
+            markdown += f"- {emoji} {st}: {count}\n"
+
+        markdown += "\n**By Workspace:**\n"
+        for ws, count in sorted(workspace_counts.items(), key=lambda x: -x[1])[:10]:
+            markdown += f"- {ws}: {count}\n"
+
+        markdown += "\n**By Item Type:**\n"
+        for it, count in sorted(type_counts.items(), key=lambda x: -x[1]):
+            markdown += f"- {it}: {count}\n"
+
+        if workspace_errors:
+            markdown += f"\n**⚠️ Errors ({len(workspace_errors)}):**\n"
+            for err in workspace_errors[:5]:
+                markdown += f"- {err}\n"
+
+        return markdown
+
+    except Exception as e:
+        logger.error(f"Error listing all Spark jobs: {str(e)}")
+        return f"Error listing all Spark jobs: {str(e)}"
 
 
 @mcp.tool()
@@ -1705,26 +1908,46 @@ async def get_job_details(
         if not session:
             return f"No job found with ID '{job_id}' for notebook '{notebook}' in workspace '{ws}'."
 
+        # Log the raw session for debugging
+        logger.debug(f"Raw session data: {json.dumps(session, indent=2, default=str)}")
+
+        # Enrich session with resolved names (capacity name, workspace name, etc.)
+        session = await spark_client.enrich_session_with_names(session)
+
+        # Get notebook metadata to get the display name
+        notebook_client = NotebookClient(fabric_client)
+        notebook_meta = await notebook_client.get_notebook(workspace_id, notebook_id)
+
+        # Resolve notebook name - try multiple sources (API field is 'itemName')
+        notebook_name = session.get('itemName')
+        if not notebook_name and isinstance(notebook_meta, dict):
+            notebook_name = notebook_meta.get("displayName")
+        if not notebook_name:
+            notebook_name = notebook
+
+        # Get item info from session
+        item_info = session.get('item', {})
+        item_id = item_info.get('id', notebook_id)
+
         # Format detailed information
         markdown = f"# Spark Job Details\n\n"
 
         # Basic Information
         markdown += f"## Basic Information\n"
-        markdown += f"**Job ID (Livy ID):** {session.get('livyId', 'N/A')}\n"
-        markdown += f"**Workspace:** {ws}\n"
+        markdown += f"| Field | Value |\n"
+        markdown += f"|-------|-------|\n"
+        markdown += f"| **Livy ID** | `{session.get('livyId', job_id)}` |\n"
+        markdown += f"| **Livy Name** | {session.get('livyName', 'N/A')} |\n"
+        markdown += f"| **Workspace** | {ws} |\n"
+        markdown += f"| **Item Name** | {notebook_name} |\n"
+        markdown += f"| **Item ID** | `{item_id}` |\n"
+        markdown += f"| **Item Type** | {session.get('itemType', 'Notebook')} |\n"
 
-        # Notebook name from session
-        notebook_name = session.get('itemName', notebook)
-        markdown += f"**Notebook Name:** {notebook_name}\n"
-        markdown += f"**Notebook ID:** {session.get('item', {}).get('id', notebook_id)}\n"
-
-        # Job Instance ID for linking to DAG/Run
         job_instance_id = session.get('jobInstanceId')
-        if job_instance_id:
-            markdown += f"**Job Instance ID:** {job_instance_id}\n"
-
-        markdown += f"**Job Type:** {session.get('jobType', 'N/A')}\n"
-        markdown += f"**Operation:** {session.get('operationName', 'N/A')}\n\n"
+        markdown += f"| **Job Instance ID** | `{job_instance_id or 'N/A'}` |\n"
+        markdown += f"| **Job Type** | {session.get('jobType', 'N/A')} |\n"
+        markdown += f"| **Operation** | {session.get('operationName', 'N/A')} |\n"
+        markdown += f"| **Origin** | {session.get('origin', 'N/A')} |\n"
 
         # Status information
         state = session.get('state', 'Unknown')
@@ -1733,11 +1956,13 @@ async def get_job_details(
             "Failed": "❌",
             "InProgress": "⏳",
             "NotStarted": "⏸️",
-            "Cancelled": "🚫"
+            "Cancelled": "🚫",
+            "Unknown": "❓"
         }.get(state, "")
 
-        markdown += f"## Status\n"
+        markdown += f"\n## Status\n"
         markdown += f"**State:** {status_emoji} {state}\n"
+        markdown += f"**Attempt:** {session.get('attemptNumber', 1)} of {session.get('maxNumberOfAttempts', 1)}\n"
 
         # Cancellation reason if applicable
         if state == "Cancelled":
@@ -1745,27 +1970,31 @@ async def get_job_details(
             if cancellation_reason:
                 markdown += f"**Cancellation Reason:** {cancellation_reason}\n"
 
-        # Timing information with detailed durations
+        # Timing information
         submitted = session.get('submittedDateTime', 'N/A')
         started = session.get('startDateTime', 'N/A')
         ended = session.get('endDateTime', 'N/A')
 
         markdown += f"\n## Timing\n"
-        markdown += f"**Submitted:** {submitted}\n"
-        markdown += f"**Started:** {started}\n"
-        markdown += f"**Ended:** {ended}\n"
+        markdown += f"| Phase | Timestamp |\n"
+        markdown += f"|-------|----------|\n"
+        markdown += f"| Submitted | {submitted} |\n"
+        markdown += f"| Started | {started} |\n"
+        markdown += f"| Ended | {ended} |\n"
 
         # Duration details from API
         queued_duration = session.get('queuedDuration')
         running_duration = session.get('runningDuration')
         total_duration = session.get('totalDuration')
 
+        markdown += f"\n| Duration Type | Value |\n"
+        markdown += f"|---------------|-------|\n"
         if queued_duration:
-            markdown += f"**Queued Duration:** {queued_duration}\n"
+            markdown += f"| Queued | {queued_duration} |\n"
         if running_duration:
-            markdown += f"**Running Duration:** {running_duration}\n"
+            markdown += f"| Running | {running_duration} |\n"
         if total_duration:
-            markdown += f"**Total Duration:** {total_duration}\n"
+            markdown += f"| **Total** | **{total_duration}** |\n"
 
         # Calculate duration if not provided by API
         if not total_duration and submitted != 'N/A' and ended != 'N/A':
@@ -1773,101 +2002,167 @@ async def get_job_details(
                 submitted_dt = datetime.fromisoformat(submitted.replace("Z", "+00:00"))
                 ended_dt = datetime.fromisoformat(ended.replace("Z", "+00:00"))
                 duration_seconds = (ended_dt - submitted_dt).total_seconds()
-                markdown += f"**Calculated Duration:** {int(duration_seconds // 60)}m {int(duration_seconds % 60)}s\n"
+                mins = int(duration_seconds // 60)
+                secs = int(duration_seconds % 60)
+                markdown += f"| **Calculated Total** | **{mins}m {secs}s** |\n"
             except Exception:
                 pass
 
         # Submitter information
         submitter = session.get('submitter', {})
+        consumer = session.get('consumerId', {})
         markdown += f"\n## Submitter\n"
-        markdown += f"**ID:** {submitter.get('id', 'N/A')}\n"
-        markdown += f"**Type:** {submitter.get('type', 'N/A')}\n"
+        markdown += f"| Field | Value |\n"
+        markdown += f"|-------|-------|\n"
 
-        # Resource Configuration
+        submitter_id = submitter.get('id', 'N/A')
+        submitter_type = submitter.get('type', 'N/A')
+        # Display name might be in the principal object (check displayName, userPrincipalName, name)
+        submitter_name = (
+            submitter.get('displayName') or
+            submitter.get('userPrincipalName') or
+            submitter.get('name') or
+            submitter.get('upn')
+        )
+
+        if submitter_name:
+            markdown += f"| **Submitter** | {submitter_name} |\n"
+        markdown += f"| Submitter ID | `{submitter_id}` |\n"
+        markdown += f"| Submitter Type | {submitter_type} |\n"
+
+        if consumer and consumer.get('id'):
+            consumer_name = (
+                consumer.get('displayName') or
+                consumer.get('userPrincipalName') or
+                consumer.get('name')
+            )
+            if consumer_name:
+                markdown += f"| **Consumer** | {consumer_name} |\n"
+            markdown += f"| Consumer ID | `{consumer.get('id')}` |\n"
+
+        # Resource Configuration - always show this section
         markdown += f"\n## Resource Configuration\n"
         driver_memory = session.get('driverMemory')
         driver_cores = session.get('driverCores')
         executor_memory = session.get('executorMemory')
         executor_cores = session.get('executorCores')
         num_executors = session.get('numExecutors')
-
-        if driver_memory or driver_cores:
-            markdown += f"**Driver:** {driver_cores or 'N/A'} cores, {driver_memory or 'N/A'} GB memory\n"
-        if executor_memory or executor_cores or num_executors:
-            markdown += f"**Executors:** {num_executors or 'N/A'} executors × {executor_cores or 'N/A'} cores × {executor_memory or 'N/A'} GB memory\n"
-
-        # Dynamic allocation
         is_dynamic = session.get('isDynamicAllocationEnabled')
-        if is_dynamic:
-            max_executors = session.get('dynamicAllocationMaxExecutors')
-            markdown += f"**Dynamic Allocation:** Enabled (max {max_executors} executors)\n"
-
-        # Runtime and environment
+        max_executors = session.get('dynamicAllocationMaxExecutors')
         runtime_version = session.get('runtimeVersion')
-        if runtime_version:
-            markdown += f"**Runtime Version:** {runtime_version}\n"
-
-        # High concurrency mode
         is_high_concurrency = session.get('isHighConcurrency')
-        if is_high_concurrency:
-            markdown += f"**High Concurrency Mode:** Enabled\n"
+
+        markdown += f"| Resource | Value |\n"
+        markdown += f"|----------|-------|\n"
+        markdown += f"| Driver Cores | {driver_cores if driver_cores is not None else 'N/A'} |\n"
+        markdown += f"| Driver Memory | {f'{driver_memory} GB' if driver_memory is not None else 'N/A'} |\n"
+        markdown += f"| Executor Cores | {executor_cores if executor_cores is not None else 'N/A'} |\n"
+        markdown += f"| Executor Memory | {f'{executor_memory} GB' if executor_memory is not None else 'N/A'} |\n"
+        markdown += f"| Num Executors | {num_executors if num_executors is not None else 'N/A'} |\n"
+        markdown += f"| Dynamic Allocation | {'Yes' if is_dynamic else 'No'} |\n"
+        if is_dynamic and max_executors:
+            markdown += f"| Max Executors | {max_executors} |\n"
+        markdown += f"| Runtime Version | {runtime_version or 'N/A'} |\n"
+        markdown += f"| High Concurrency | {'Yes' if is_high_concurrency else 'No'} |\n"
 
         # Spark Application Information
         spark_app_id = session.get('sparkApplicationId')
+        markdown += f"\n## Spark Application\n"
         if spark_app_id:
-            markdown += f"\n## Spark Application\n"
-            markdown += f"**Spark Application ID:** {spark_app_id}\n"
-            markdown += f"**Spark UI URL:** [View Spark UI](https://spark.fabric.microsoft.com/sparkui/{spark_app_id})\n"
+            markdown += f"**Spark Application ID:** `{spark_app_id}`\n"
+            markdown += f"**Spark UI:** [Open Spark UI](https://app.fabric.microsoft.com/groups/{workspace_id}/sparkapplication/{spark_app_id})\n"
+        else:
+            markdown += f"**Spark Application ID:** Not yet assigned (job may not have started or app ID not available)\n"
 
-        # Error information if failed - Enhanced with job instance details
+        # Error information if failed
+        job_instance = None
         if state == "Failed":
-            markdown += f"\n## Error Information\n"
+            markdown += f"\n## ❌ Error Information\n"
 
             # Try to get detailed error from job instance API
             if job_instance_id:
                 job_instance = await spark_client.get_job_instance(workspace_id, notebook_id, job_instance_id)
                 if job_instance:
-                    failure_reason = job_instance.get('failureReason')
+                    logger.debug(f"Job instance data: {json.dumps(job_instance, indent=2, default=str)}")
+                    failure_reason = (
+                        job_instance.get('failureReason') or
+                        job_instance.get('errorMessage') or
+                        job_instance.get('error') or
+                        job_instance.get('message')
+                    )
                     if failure_reason:
-                        markdown += f"**Failure Reason:** {failure_reason}\n\n"
+                        markdown += f"**Failure Reason:**\n```\n{failure_reason}\n```\n\n"
 
-                    # Include root activity ID for debugging
                     root_activity_id = job_instance.get('rootActivityId')
                     if root_activity_id:
-                        markdown += f"**Root Activity ID:** {root_activity_id}\n"
+                        markdown += f"**Root Activity ID:** `{root_activity_id}`\n"
 
             # Include any errors from the session response
-            errors = session.get('errors', [])
+            errors = session.get('errors') or session.get('error') or []
+            if isinstance(errors, dict):
+                errors = [errors]
             if errors:
                 markdown += f"\n**Error Details:**\n"
                 for error in errors:
-                    error_code = error.get('errorCode', 'Unknown')
-                    error_message = error.get('message', 'No message')
-                    error_source = error.get('source', '')
+                    if isinstance(error, str):
+                        markdown += f"```\n{error}\n```\n"
+                    else:
+                        error_code = error.get('errorCode') or error.get('code') or 'Unknown'
+                        error_message = error.get('message') or error.get('errorMessage') or 'No message'
+                        error_source = error.get('source') or ''
+                        markdown += f"- **{error_code}**"
+                        if error_source:
+                            markdown += f" (Source: {error_source})"
+                        markdown += f"\n  ```\n  {error_message}\n  ```\n"
 
-                    markdown += f"- **{error_code}**"
-                    if error_source:
-                        markdown += f" (Source: {error_source})"
-                    markdown += f"\n  {error_message}\n"
+            # If no specific errors found
+            has_failure_info = bool(errors) or (job_instance and (job_instance.get('failureReason') or job_instance.get('errorMessage')))
+            if not has_failure_info:
+                markdown += "\n⚠️ *No detailed error information available from the API.*\n"
+                markdown += "*Check the Spark logs in the Fabric portal for more details.*\n"
 
-            # If no specific errors found, provide guidance
-            if not errors and not (job_instance_id and job_instance and job_instance.get('failureReason')):
-                markdown += "\n*No detailed error information available. Check the Spark logs for more details.*\n"
+        # Capacity and Workspace IDs - show names where available
+        markdown += f"\n## Infrastructure\n"
+        markdown += f"| Field | Value |\n"
+        markdown += f"|-------|-------|\n"
 
-        # Additional metadata
-        markdown += f"\n## Additional Information\n"
-        markdown += f"**Capacity ID:** {session.get('capacityId', 'N/A')}\n"
-        markdown += f"**Workspace ID:** {session.get('workspaceId', 'N/A')}\n"
-        markdown += f"**Origin:** {session.get('origin', 'N/A')}\n"
-        markdown += f"**Attempt Number:** {session.get('attemptNumber', 'N/A')} of {session.get('maxNumberOfAttempts', 'N/A')}\n"
+        # Capacity - show name if resolved
+        capacity_id = session.get('capacityId', 'N/A')
+        capacity_name = session.get('capacityName')
+        if capacity_name and capacity_name != capacity_id:
+            markdown += f"| **Capacity** | {capacity_name} |\n"
+        markdown += f"| Capacity ID | `{capacity_id}` |\n"
+
+        # Workspace - show name if resolved
+        ws_id = session.get('workspaceId') or workspace_id
+        ws_name = session.get('workspaceName') or ws
+        if ws_name and ws_name != ws_id:
+            markdown += f"| **Workspace** | {ws_name} |\n"
+        markdown += f"| Workspace ID | `{ws_id}` |\n"
+
+        # Creator item (for high concurrency)
+        creator_item = session.get('creatorItem', {})
+        if creator_item and creator_item.get('id'):
+            markdown += f"| Creator Item ID | `{creator_item.get('id')}` |\n"
+
+        # Livy session item resource URI
+        livy_uri = session.get('livySessionItemResourceUri')
+        if livy_uri:
+            markdown += f"| Livy Session URI | `{livy_uri}` |\n"
 
         # Monitoring Links
-        markdown += f"\n## Monitoring & Logs\n"
-        markdown += f"- **Job Instance ID:** `{job_instance_id or 'N/A'}`\n"
-        if spark_app_id:
-            markdown += f"- **Spark Application UI:** [Open UI](https://spark.fabric.microsoft.com/sparkui/{spark_app_id})\n"
+        markdown += f"\n## 🔗 Monitoring Links\n"
         markdown += f"- **Workspace:** [{ws}](https://app.fabric.microsoft.com/groups/{workspace_id})\n"
         markdown += f"- **Notebook:** [{notebook_name}](https://app.fabric.microsoft.com/groups/{workspace_id}/notebooks/{notebook_id})\n"
+        if spark_app_id:
+            markdown += f"- **Spark UI:** [Open Spark Application](https://app.fabric.microsoft.com/groups/{workspace_id}/sparkapplication/{spark_app_id})\n"
+        if job_instance_id:
+            markdown += f"- **Monitoring Hub:** [View Job Run](https://app.fabric.microsoft.com/groups/{workspace_id}/monitoringhub?experience=fabric-developer&jobId={job_instance_id})\n"
+
+        # Debug: show raw session keys if verbose
+        markdown += f"\n<details>\n<summary>Raw API Fields Available</summary>\n\n"
+        markdown += f"```\n{', '.join(sorted(session.keys()))}\n```\n"
+        markdown += f"</details>\n"
 
         return markdown
 

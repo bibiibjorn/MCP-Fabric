@@ -4,17 +4,29 @@ from azure.identity import (
     AuthenticationRecord,
 )
 from cachetools import TTLCache
+from datetime import datetime, timedelta
+import json
 import os
 import sys
 import logging
 
 logger = logging.getLogger(__name__)
 
+# How often to require re-authentication (in hours)
+REAUTH_INTERVAL_HOURS = 24
+
 # Path to store authentication record for persistence across restarts
 AUTH_RECORD_PATH = os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
     ".fabric_mcp_python",
     "auth_record.json"
+)
+
+# Path to store last login timestamp
+LAST_LOGIN_PATH = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+    ".fabric_mcp_python",
+    "last_login.json"
 )
 
 FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
@@ -25,10 +37,9 @@ POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
 _shared_credential = None
 _shared_auth_record = None
 
-# Cache options used throughout
+# Cache options used throughout - uses DPAPI encryption on Windows
 _cache_options = TokenCachePersistenceOptions(
     name="fabric_mcp_python",
-    allow_unencrypted_storage=True,
 )
 
 
@@ -46,6 +57,33 @@ def _load_auth_record():
     except Exception:
         pass
     return None
+
+
+def _save_last_login():
+    """Save the current timestamp as last login time."""
+    os.makedirs(os.path.dirname(LAST_LOGIN_PATH), exist_ok=True)
+    with open(LAST_LOGIN_PATH, "w") as f:
+        json.dump({"last_login": datetime.now().isoformat()}, f)
+
+
+def _is_login_expired() -> bool:
+    """Check if the last login was more than REAUTH_INTERVAL_HOURS ago."""
+    try:
+        if os.path.exists(LAST_LOGIN_PATH):
+            with open(LAST_LOGIN_PATH, "r") as f:
+                data = json.load(f)
+                last_login = datetime.fromisoformat(data["last_login"])
+                age = datetime.now() - last_login
+                if age > timedelta(hours=REAUTH_INTERVAL_HOURS):
+                    logger.info(f"Last login was {age.total_seconds() / 3600:.1f} hours ago - re-authentication required")
+                    return True
+                else:
+                    logger.info(f"Last login was {age.total_seconds() / 3600:.1f} hours ago - still valid")
+                    return False
+    except Exception as e:
+        logger.warning(f"Could not read last login time: {e}")
+    # No record means we need to login
+    return True
 
 
 def _save_auth_record(auth_record: AuthenticationRecord):
@@ -70,6 +108,7 @@ def _perform_interactive_auth() -> tuple:
         # This opens browser for authentication
         auth_record = cred.authenticate(scopes=[FABRIC_SCOPE])
         _save_auth_record(auth_record)
+        _save_last_login()  # Record when this login happened
         logger.info(f"Authentication successful! Logged in as: {auth_record.username}")
         return cred, auth_record
     except Exception as e:
@@ -100,16 +139,22 @@ def get_shared_credential():
     if _shared_credential is not None:
         return _shared_credential
 
+    # Check if daily re-authentication is required
+    login_expired = _is_login_expired()
+
     # Try to load existing authentication record
     auth_record = _load_auth_record()
 
-    if auth_record is None:
-        # No cached credentials - perform interactive auth
-        logger.info("No cached credentials found.")
+    if auth_record is None or login_expired:
+        # No cached credentials OR daily login required - perform interactive auth
+        if login_expired and auth_record is not None:
+            logger.info("Daily re-authentication required.")
+        else:
+            logger.info("No cached credentials found.")
         _shared_credential, _shared_auth_record = _perform_interactive_auth()
         return _shared_credential
 
-    # Have cached credentials - try to use them
+    # Have cached credentials that are still within daily window - try to use them
     logger.info(f"Found cached credentials for: {auth_record.username}")
 
     cred = InteractiveBrowserCredential(

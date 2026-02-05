@@ -28,11 +28,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run MCP server")
     parser.add_argument("--port", type=int, default=None, help="Localhost port to listen on (HTTP mode)")
     parser.add_argument("--stdio", action="store_true", help="Run in STDIO mode for Claude Desktop")
-    parser.add_argument("--skip-auth", action="store_true", help="Skip authentication check at startup")
+    parser.add_argument("--eager-auth", action="store_true", help="Authenticate at startup instead of on first tool use")
     args = parser.parse_args()
 
-    # Ensure authentication before starting
-    if not args.skip_auth:
+    # By default, authentication happens lazily on first tool use
+    # Use --eager-auth to authenticate at startup instead
+    if args.eager_auth:
         try:
             ensure_authenticated()
         except AuthenticationError as e:

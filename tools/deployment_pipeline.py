@@ -9,33 +9,64 @@ logger = get_logger(__name__)
 
 
 @mcp.tool()
-async def manage_deployment_pipeline(
+async def manage_deployment(
     action: str,
     pipeline_id: Optional[str] = None,
     name: Optional[str] = None,
     description: Optional[str] = None,
+    stage_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+    source_stage_id: Optional[str] = None,
+    target_stage_id: Optional[str] = None,
+    items: Optional[List[Dict[str, str]]] = None,
+    note: Optional[str] = None,
+    allow_create_artifact: bool = True,
+    allow_overwrite_artifact: bool = True,
     ctx: Context = None,
 ) -> str:
-    """Create, list, get, update, or delete deployment pipelines.
+    """Manage deployment pipelines, stages, and deployments in Microsoft Fabric.
 
     Deployment pipelines enable CI/CD for Fabric items across
     development, test, and production stages.
 
     Args:
-        action: Operation: 'list', 'get', 'create', 'update', 'delete'
-        pipeline_id: Pipeline ID (required for get/update/delete)
-        name: Pipeline display name (required for create, optional for update)
-        description: Pipeline description (optional for create/update)
+        action: Operation to perform:
+            Pipeline CRUD:
+                'list_pipelines' - List all deployment pipelines
+                'get_pipeline' - Get details of a specific pipeline
+                'create_pipeline' - Create a new deployment pipeline
+                'update_pipeline' - Update a pipeline's name/description
+                'delete_pipeline' - Delete a deployment pipeline
+            Stage management:
+                'list_stages' - List all stages in a pipeline
+                'assign_workspace' - Assign a workspace to a stage
+                'unassign_workspace' - Remove workspace from a stage
+                'list_stage_items' - List items deployed in a stage
+            Deploy:
+                'deploy' - Deploy content from one stage to another
+        pipeline_id: Pipeline ID (required for most actions except list_pipelines and create_pipeline)
+        name: Pipeline display name (required for create_pipeline, optional for update_pipeline)
+        description: Pipeline description (optional for create_pipeline/update_pipeline)
+        stage_id: Stage ID (required for assign_workspace, unassign_workspace, list_stage_items)
+        workspace: Workspace name or ID (required for assign_workspace)
+        source_stage_id: Source stage ID for deploy (required for deploy)
+        target_stage_id: Target stage ID for deploy (optional, defaults to next stage)
+        items: Specific items to deploy (optional for deploy).
+            Each item: {"sourceItemId": "...", "targetItemId": "..."} or {"sourceItemId": "..."}
+        note: Deployment note (optional for deploy)
+        allow_create_artifact: Allow creating new items in target during deploy (default: True)
+        allow_overwrite_artifact: Allow overwriting existing items during deploy (default: True)
         ctx: Context object
 
     Returns:
-        Pipeline details or confirmation message
+        Pipeline/stage details, item lists, deployment status, or confirmation message
     """
     try:
         credential = get_azure_credentials(ctx.client_id, __ctx_cache)
         fabric_client = FabricApiClient(credential)
 
-        if action == "list":
+        # --- list_pipelines ---
+        if action == "list_pipelines":
             results = await fabric_client._make_request(
                 endpoint="deploymentPipelines",
                 use_pagination=True,
@@ -57,9 +88,10 @@ async def manage_deployment_pipeline(
             markdown += f"\n**Total:** {len(results)} pipeline(s)"
             return markdown
 
-        elif action == "get":
+        # --- get_pipeline ---
+        elif action == "get_pipeline":
             if not pipeline_id:
-                return "Error: pipeline_id is required for 'get' action."
+                return "Error: pipeline_id is required for 'get_pipeline' action."
 
             result = await fabric_client._make_request(
                 endpoint=f"deploymentPipelines/{pipeline_id}",
@@ -75,9 +107,10 @@ async def manage_deployment_pipeline(
 
             return markdown
 
-        elif action == "create":
+        # --- create_pipeline ---
+        elif action == "create_pipeline":
             if not name:
-                return "Error: name is required for 'create' action."
+                return "Error: name is required for 'create_pipeline' action."
 
             body = {"displayName": name}
             if description:
@@ -95,9 +128,10 @@ async def manage_deployment_pipeline(
                 return f"Deployment pipeline '{name}' created successfully.\n\n**ID:** {pid}"
             return "Deployment pipeline creation submitted."
 
-        elif action == "update":
+        # --- update_pipeline ---
+        elif action == "update_pipeline":
             if not pipeline_id:
-                return "Error: pipeline_id is required for 'update' action."
+                return "Error: pipeline_id is required for 'update_pipeline' action."
 
             body = {}
             if name:
@@ -116,9 +150,10 @@ async def manage_deployment_pipeline(
 
             return f"Deployment pipeline '{pipeline_id}' updated successfully."
 
-        elif action == "delete":
+        # --- delete_pipeline ---
+        elif action == "delete_pipeline":
             if not pipeline_id:
-                return "Error: pipeline_id is required for 'delete' action."
+                return "Error: pipeline_id is required for 'delete_pipeline' action."
 
             await fabric_client._make_request(
                 endpoint=f"deploymentPipelines/{pipeline_id}",
@@ -127,45 +162,11 @@ async def manage_deployment_pipeline(
 
             return f"Deployment pipeline '{pipeline_id}' deleted successfully."
 
-        else:
-            return f"Error: Unknown action '{action}'. Use 'list', 'get', 'create', 'update', or 'delete'."
+        # --- list_stages ---
+        elif action == "list_stages":
+            if not pipeline_id:
+                return "Error: pipeline_id is required for 'list_stages' action."
 
-    except Exception as e:
-        return f"Error managing deployment pipeline: {str(e)}"
-
-
-@mcp.tool()
-async def manage_deployment_stages(
-    action: str,
-    pipeline_id: str,
-    stage_id: Optional[str] = None,
-    workspace: Optional[str] = None,
-    ctx: Context = None,
-) -> str:
-    """Manage deployment pipeline stages.
-
-    List stages, assign/unassign workspaces, and list items in stages.
-
-    Args:
-        action: Operation:
-            'list_stages' - List all stages in the pipeline
-            'get_stage' - Get a specific stage
-            'assign_workspace' - Assign a workspace to a stage
-            'unassign_workspace' - Remove workspace from a stage
-            'list_items' - List items deployed in a stage
-        pipeline_id: Deployment pipeline ID
-        stage_id: Stage ID (required for get_stage, assign_workspace, unassign_workspace, list_items)
-        workspace: Workspace name or ID (required for assign_workspace)
-        ctx: Context object
-
-    Returns:
-        Stage details, items list, or confirmation message
-    """
-    try:
-        credential = get_azure_credentials(ctx.client_id, __ctx_cache)
-        fabric_client = FabricApiClient(credential)
-
-        if action == "list_stages":
             results = await fabric_client._make_request(
                 endpoint=f"deploymentPipelines/{pipeline_id}/stages",
                 use_pagination=True,
@@ -188,27 +189,10 @@ async def manage_deployment_stages(
 
             return markdown
 
-        elif action == "get_stage":
-            if not stage_id:
-                return "Error: stage_id is required for 'get_stage' action."
-
-            result = await fabric_client._make_request(
-                endpoint=f"deploymentPipelines/{pipeline_id}/stages/{stage_id}",
-            )
-
-            if not result:
-                return f"Error: Could not retrieve stage '{stage_id}'."
-
-            markdown = "# Stage Details\n\n"
-            markdown += f"**Stage ID:** {result.get('id', 'N/A')}\n"
-            markdown += f"**Display Name:** {result.get('displayName', 'N/A')}\n"
-            markdown += f"**Order:** {result.get('order', 'N/A')}\n"
-            markdown += f"**Workspace ID:** {result.get('workspaceId', 'Not assigned')}\n"
-            markdown += f"**Workspace Name:** {result.get('workspaceName', 'N/A')}\n"
-
-            return markdown
-
+        # --- assign_workspace ---
         elif action == "assign_workspace":
+            if not pipeline_id:
+                return "Error: pipeline_id is required for 'assign_workspace' action."
             if not stage_id:
                 return "Error: stage_id is required for 'assign_workspace' action."
             if not workspace:
@@ -224,7 +208,10 @@ async def manage_deployment_stages(
 
             return f"Workspace '{workspace}' assigned to stage '{stage_id}' successfully."
 
+        # --- unassign_workspace ---
         elif action == "unassign_workspace":
+            if not pipeline_id:
+                return "Error: pipeline_id is required for 'unassign_workspace' action."
             if not stage_id:
                 return "Error: stage_id is required for 'unassign_workspace' action."
 
@@ -236,9 +223,12 @@ async def manage_deployment_stages(
 
             return f"Workspace unassigned from stage '{stage_id}' successfully."
 
-        elif action == "list_items":
+        # --- list_stage_items ---
+        elif action == "list_stage_items":
+            if not pipeline_id:
+                return "Error: pipeline_id is required for 'list_stage_items' action."
             if not stage_id:
-                return "Error: stage_id is required for 'list_items' action."
+                return "Error: stage_id is required for 'list_stage_items' action."
 
             results = await fabric_client._make_request(
                 endpoint=f"deploymentPipelines/{pipeline_id}/stages/{stage_id}/items",
@@ -262,97 +252,65 @@ async def manage_deployment_stages(
             markdown += f"\n**Total:** {len(results)} item(s)"
             return markdown
 
-        else:
-            return f"Error: Unknown action '{action}'. Use 'list_stages', 'get_stage', 'assign_workspace', 'unassign_workspace', or 'list_items'."
+        # --- deploy ---
+        elif action == "deploy":
+            if not pipeline_id:
+                return "Error: pipeline_id is required for 'deploy' action."
+            if not source_stage_id:
+                return "Error: source_stage_id is required for 'deploy' action."
 
-    except Exception as e:
-        return f"Error managing deployment stages: {str(e)}"
+            body = {
+                "sourceStageId": source_stage_id,
+                "options": {
+                    "allowCreateArtifact": allow_create_artifact,
+                    "allowOverwriteArtifact": allow_overwrite_artifact,
+                },
+            }
 
-
-@mcp.tool()
-async def deploy_stage_content(
-    pipeline_id: str,
-    source_stage_id: str,
-    target_stage_id: Optional[str] = None,
-    items: Optional[List[Dict[str, str]]] = None,
-    note: Optional[str] = None,
-    allow_create_artifact: bool = True,
-    allow_overwrite_artifact: bool = True,
-    ctx: Context = None,
-) -> str:
-    """Deploy content from one pipeline stage to another.
-
-    This is a long-running operation that deploys items between stages
-    (e.g., from Development to Test, or Test to Production).
-
-    Args:
-        pipeline_id: Deployment pipeline ID
-        source_stage_id: Source stage ID (deploy FROM this stage)
-        target_stage_id: Target stage ID (deploy TO). If omitted, deploys to the next stage.
-        items: Optional list of specific items to deploy.
-            Each item: {"sourceItemId": "...", "targetItemId": "..."} or {"sourceItemId": "..."}
-            If omitted, deploys all items.
-        note: Optional deployment note
-        allow_create_artifact: Allow creating new items in target (default: True)
-        allow_overwrite_artifact: Allow overwriting existing items (default: True)
-        ctx: Context object
-
-    Returns:
-        Deployment operation status and details
-    """
-    try:
-        credential = get_azure_credentials(ctx.client_id, __ctx_cache)
-        fabric_client = FabricApiClient(credential)
-
-        body = {
-            "sourceStageId": source_stage_id,
-            "options": {
-                "allowCreateArtifact": allow_create_artifact,
-                "allowOverwriteArtifact": allow_overwrite_artifact,
-            },
-        }
-
-        if target_stage_id:
-            body["targetStageId"] = target_stage_id
-        if items:
-            body["items"] = items
-        if note:
-            body["note"] = note
-
-        result = await fabric_client._make_request(
-            endpoint=f"deploymentPipelines/{pipeline_id}/deploy",
-            method="POST",
-            params=body,
-            lro=True,
-            lro_poll_interval=5,
-            lro_timeout=600,
-        )
-
-        if result and isinstance(result, dict):
-            status = result.get("status", result.get("operationStatus", "Unknown"))
-            markdown = "# Deployment Result\n\n"
-            markdown += f"**Pipeline ID:** {pipeline_id}\n"
-            markdown += f"**Source Stage:** {source_stage_id}\n"
-            markdown += f"**Target Stage:** {target_stage_id or 'Next stage'}\n"
-            markdown += f"**Status:** {status}\n"
-
+            if target_stage_id:
+                body["targetStageId"] = target_stage_id
+            if items:
+                body["items"] = items
             if note:
-                markdown += f"**Note:** {note}\n"
+                body["note"] = note
 
-            # Check for deployment details
-            if "deployedItems" in result:
-                deployed = result["deployedItems"]
-                markdown += f"\n**Items Deployed:** {len(deployed)}\n"
+            result = await fabric_client._make_request(
+                endpoint=f"deploymentPipelines/{pipeline_id}/deploy",
+                method="POST",
+                params=body,
+                lro=True,
+                lro_poll_interval=5,
+                lro_timeout=600,
+            )
 
-            if status in ("Succeeded", "succeeded", "Completed", "completed"):
-                markdown += "\nDeployment completed successfully."
-            elif status in ("Failed", "failed"):
-                error = result.get("error", {})
-                markdown += f"\n**Error:** {error.get('message', 'Unknown error')}\n"
+            if result and isinstance(result, dict):
+                status = result.get("status", result.get("operationStatus", "Unknown"))
+                markdown = "# Deployment Result\n\n"
+                markdown += f"**Pipeline ID:** {pipeline_id}\n"
+                markdown += f"**Source Stage:** {source_stage_id}\n"
+                markdown += f"**Target Stage:** {target_stage_id or 'Next stage'}\n"
+                markdown += f"**Status:** {status}\n"
 
-            return markdown
+                if note:
+                    markdown += f"**Note:** {note}\n"
 
-        return "Deployment submitted. Use deployment pipeline operations to check status."
+                # Check for deployment details
+                if "deployedItems" in result:
+                    deployed = result["deployedItems"]
+                    markdown += f"\n**Items Deployed:** {len(deployed)}\n"
+
+                if status in ("Succeeded", "succeeded", "Completed", "completed"):
+                    markdown += "\nDeployment completed successfully."
+                elif status in ("Failed", "failed"):
+                    error = result.get("error", {})
+                    markdown += f"\n**Error:** {error.get('message', 'Unknown error')}\n"
+
+                return markdown
+
+            return "Deployment submitted. Use deployment pipeline operations to check status."
+
+        else:
+            return f"Error: Unknown action '{action}'. Use 'list_pipelines', 'get_pipeline', 'create_pipeline', 'update_pipeline', 'delete_pipeline', 'list_stages', 'assign_workspace', 'unassign_workspace', 'list_stage_items', or 'deploy'."
 
     except Exception as e:
-        return f"Error deploying stage content: {str(e)}"
+        return f"Error managing deployment: {str(e)}"

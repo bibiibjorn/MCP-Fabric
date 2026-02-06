@@ -5,71 +5,51 @@ from helpers.clients import (
     FabricApiClient,
     WarehouseClient,
 )
-
 from typing import Optional
 
 
 @mcp.tool()
-async def list_warehouses(workspace: Optional[str] = None, ctx: Context = None) -> str:
-    """List all warehouses in a Fabric workspace.
-
-    Args:
-        workspace: Name or ID of the workspace (optional)
-        ctx: Context object containing client information
-
-    Returns:
-        A string containing the list of warehouses or an error message.
-    """
-    try:
-        client = WarehouseClient(
-            FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
-        )
-
-        ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
-        if not ws:
-            return "Workspace not set. Please set a workspace using 'set_workspace' command."
-
-        warehouses = await client.list_warehouses(ws)
-
-        return warehouses
-
-    except Exception as e:
-        return f"Error listing warehouses: {str(e)}"
-
-
-@mcp.tool()
-async def create_warehouse(
-    name: str,
+async def manage_warehouse(
+    action: str,
     workspace: Optional[str] = None,
+    name: Optional[str] = None,
     description: Optional[str] = None,
     ctx: Context = None,
 ) -> str:
-    """Create a new warehouse in a Fabric workspace.
+    """Manage Fabric warehouses.
 
     Args:
-        name: Name of the warehouse
-        workspace: Name or ID of the workspace (optional)
-        description: Description of the warehouse (optional)
-        ctx: Context object containing client information
+        action: Operation to perform:
+            'list' - List all warehouses in a workspace
+            'create' - Create a new warehouse
+        workspace: Workspace name or ID (optional, uses context if not provided)
+        name: Warehouse name (required for 'create')
+        description: Warehouse description (optional for 'create')
+        ctx: Context object
+
     Returns:
-        A string confirming the warehouse has been created or an error message.
+        Warehouse listing or creation confirmation
     """
     try:
-        client = WarehouseClient(
-            FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
-        )
+        credential = get_azure_credentials(ctx.client_id, __ctx_cache)
+        fabric_client = FabricApiClient(credential)
+        client = WarehouseClient(fabric_client)
 
         ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
         if not ws:
-            return "Workspace not set. Please set a workspace using 'set_workspace' command."
+            return "Workspace not set. Please set a workspace using set_context or provide workspace parameter."
 
-        response = await client.create_warehouse(
-            name=name,
-            workspace=ws,
-            description=description,
-        )
+        if action == "list":
+            return await client.list_warehouses(ws)
 
-        return f"Warehouse '{response.get('id', 'unknown')}' created successfully."
+        elif action == "create":
+            if not name:
+                return "Error: 'name' is required for 'create' action."
+            response = await client.create_warehouse(name=name, workspace=ws, description=description)
+            return f"Warehouse '{response.get('id', 'unknown')}' created successfully."
+
+        else:
+            return f"Error: Unknown action '{action}'. Use 'list' or 'create'."
 
     except Exception as e:
-        return f"Error creating warehouse: {str(e)}"
+        return f"Error managing warehouse: {str(e)}"

@@ -1,29 +1,16 @@
 from tools import (
-    list_workspaces, get_workspace_capacity,
-    list_warehouses, create_warehouse,
-    list_lakehouses, create_lakehouse, list_shortcuts,
-    list_tables, get_lakehouse_schema,
-    list_semantic_models, get_semantic_model,
-    list_reports, get_report,
-    load_data_from_url,
-    run_query, get_views,
-    list_notebooks, create_notebook, get_notebook_content,
-    update_notebook_cell, generate_notebook_code, validate_notebook_code,
-    analyze_notebook_performance, list_spark_jobs, get_job_details,
-    execute_dax_query, read_semantic_model_table, evaluate_measure,
-    get_semantic_model_metadata, get_refresh_history,
-    get_report_pages, get_report_details, get_report_definition,
-    get_sql_endpoint,
-    list_fabric_workloads, get_fabric_openapi_spec, get_fabric_platform_api,
-    get_fabric_best_practices, list_fabric_best_practices,
-    get_fabric_item_definition, list_fabric_item_definitions, get_fabric_api_examples,
-    # Job Scheduler
-    run_item_job, get_job_status, cancel_job, list_job_instances, manage_item_schedule,
-    # Deployment Pipelines
-    manage_deployment_pipeline, manage_deployment_stages, deploy_stage_content,
-    # Environments
-    manage_environment, manage_environment_compute, manage_environment_libraries,
-    publish_environment,
+    manage_workspace,
+    manage_warehouse,
+    manage_lakehouse,
+    manage_tables, run_query,
+    manage_semantic_model, query_semantic_model,
+    manage_report,
+    manage_notebook, manage_spark_jobs,
+    load_data,
+    manage_item_job,
+    manage_deployment,
+    manage_environment,
+    fabric_reference,
 )
 from helpers.logging_config import get_logger
 from helpers.utils.context import mcp, __ctx_cache

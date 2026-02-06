@@ -5,7 +5,7 @@ from helpers.clients import (
     FabricApiClient,
     TableClient,
     SQLClient,
-    get_sql_endpoint,
+    get_sql_endpoint as _resolve_sql_endpoint,
 )
 
 from typing import Optional
@@ -27,95 +27,141 @@ def _validate_sql_identifier(value: str) -> str:
 
 
 @mcp.tool()
-async def list_tables(
+async def manage_tables(
+    action: str,
     workspace: Optional[str] = None,
     lakehouse: Optional[str] = None,
+    warehouse: Optional[str] = None,
+    table_name: Optional[str] = None,
+    view_name: Optional[str] = None,
+    schema_name: Optional[str] = None,
+    type: Optional[str] = None,
     ctx: Context = None,
 ) -> str:
-    """List all tables in a Fabric workspace.
+    """Manage tables, schemas, views, and SQL endpoints in Fabric lakehouses/warehouses.
 
     Args:
-        workspace: Name or ID of the workspace (optional)
-        lakehouse: Name or ID of the lakehouse (optional)
-        ctx: Context object containing client information
+        action: Operation to perform:
+            'list' - List all tables in a lakehouse
+            'get_schema' - Get schema for one or all Delta tables
+            'get_views' - List views or get a specific view's schema and SQL definition
+            'get_sql_endpoint' - Get the SQL endpoint connection string
+        workspace: Workspace name or ID (uses context if not provided)
+        lakehouse: Lakehouse name or ID (uses context if not provided)
+        warehouse: Warehouse name or ID (uses context if not provided)
+        table_name: Table name (for 'get_schema' to get a single table)
+        view_name: View name (for 'get_views' to get a specific view)
+        schema_name: SQL schema name e.g. 'dbo' (for 'get_views')
+        type: Resource type ('lakehouse' or 'warehouse'). Inferred if not provided.
+        ctx: Context object
 
     Returns:
-        A string containing the list of tables or an error message.
+        Table listings, schema details, view definitions, or SQL endpoint info
     """
     try:
-        client = TableClient(
-            FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
-        )
+        if ctx is None:
+            raise ValueError("Context (ctx) must be provided.")
+
+        credential = get_azure_credentials(ctx.client_id, __ctx_cache)
 
         ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
-        lh = lakehouse or __ctx_cache.get(f"{ctx.client_id}_lakehouse")
         if not ws:
-            return "Workspace not set. Please set a workspace using 'set_workspace' command."
-        if not lh:
-            return "Lakehouse not set. Please set a lakehouse using 'set_lakehouse' command."
+            return "Workspace not set. Please set a workspace using set_context or provide workspace parameter."
 
-        tables = await client.list_tables(
-            workspace_id=ws,
-            rsc_id=lh,
-        )
+        if action == "list":
+            client = TableClient(FabricApiClient(credential))
+            lh = lakehouse or __ctx_cache.get(f"{ctx.client_id}_lakehouse")
+            if not lh:
+                return "Lakehouse not set. Please set a lakehouse using set_context or provide lakehouse parameter."
+            return await client.list_tables(workspace_id=ws, rsc_id=lh)
 
-        return tables
+        elif action == "get_schema":
+            client = TableClient(FabricApiClient(credential))
+            lh = lakehouse or __ctx_cache.get(f"{ctx.client_id}_lakehouse")
+            if not lh:
+                return "Lakehouse not set. Please set a lakehouse using set_context or provide lakehouse parameter."
 
-    except Exception as e:
-        return f"Error listing tables: {str(e)}"
-
-
-@mcp.tool()
-async def get_lakehouse_schema(
-    workspace: Optional[str] = None,
-    lakehouse: Optional[str] = None,
-    table_name: Optional[str] = None,
-    ctx: Context = None,
-) -> str:
-    """Get schema for one or all Delta tables in a Fabric lakehouse.
-
-    If table_name is provided, returns the schema for that specific table.
-    If table_name is omitted, returns schemas for all Delta tables.
-
-    Args:
-        workspace: Name or ID of the workspace (uses context if not provided)
-        lakehouse: Name or ID of the lakehouse (uses context if not provided)
-        table_name: Name of a specific table (optional - omit for all tables)
-        ctx: Context object containing client information
-
-    Returns:
-        A string containing the table schema(s) or an error message.
-    """
-    try:
-        credential = get_azure_credentials(ctx.client_id, __ctx_cache)
-        client = TableClient(FabricApiClient(credential))
-
-        if workspace is None:
-            if f"{ctx.client_id}_workspace" in __ctx_cache:
-                workspace = __ctx_cache[f"{ctx.client_id}_workspace"]
+            if table_name:
+                return await client.get_table_schema(ws, lh, "lakehouse", table_name, credential)
             else:
-                return "Workspace must be specified or set in the context."
-        if lakehouse is None:
-            if f"{ctx.client_id}_lakehouse" in __ctx_cache:
-                lakehouse = __ctx_cache[f"{ctx.client_id}_lakehouse"]
-            else:
-                return "Lakehouse must be specified or set in the context."
+                return await client.get_all_schemas(ws, lh, "lakehouse", credential)
 
-        if table_name:
-            # Single table schema
-            schema = await client.get_table_schema(
-                workspace, lakehouse, "lakehouse", table_name, credential
+        elif action == "get_views":
+            lh = lakehouse or __ctx_cache.get(f"{ctx.client_id}_lakehouse")
+            wh = warehouse or __ctx_cache.get(f"{ctx.client_id}_warehouse")
+
+            database, sql_endpoint = await _resolve_sql_endpoint(
+                workspace=ws, lakehouse=lh, warehouse=wh, type=type,
             )
-            return schema
+            if not database or not sql_endpoint or sql_endpoint.startswith("Error") or sql_endpoint.startswith("No SQL endpoint"):
+                return f"Failed to resolve SQL endpoint: {sql_endpoint}"
+
+            client = SQLClient(sql_endpoint=sql_endpoint, database=database)
+
+            if view_name:
+                effective_schema = schema_name or "dbo"
+                _validate_sql_identifier(effective_schema)
+                _validate_sql_identifier(view_name)
+
+                columns_query = f"""
+                    SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,
+                           NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE
+                    FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = '{effective_schema}' AND TABLE_NAME = '{view_name}'
+                    ORDER BY ORDINAL_POSITION
+                """
+                columns_df = client.run_query(columns_query)
+
+                definition_query = f"""
+                    SELECT VIEW_DEFINITION FROM INFORMATION_SCHEMA.VIEWS
+                    WHERE TABLE_SCHEMA = '{effective_schema}' AND TABLE_NAME = '{view_name}'
+                """
+                definition_df = client.run_query(definition_query)
+
+                if columns_df.is_empty():
+                    return f"View '{effective_schema}.{view_name}' not found."
+
+                result = f"## View: {effective_schema}.{view_name}\n\n### Columns\n\n"
+                result += columns_df.to_pandas().to_markdown(index=False)
+                if not definition_df.is_empty():
+                    definition = definition_df.to_pandas().iloc[0, 0]
+                    result += f"\n\n### Definition\n\n```sql\n{definition}\n```"
+                return result
+            else:
+                if schema_name:
+                    _validate_sql_identifier(schema_name)
+                    schema_filter = f"WHERE TABLE_SCHEMA = '{schema_name}'"
+                else:
+                    schema_filter = ""
+
+                query = f"""
+                    SELECT TABLE_SCHEMA as schema_name, TABLE_NAME as view_name,
+                           LEFT(VIEW_DEFINITION, 200) as definition_preview
+                    FROM INFORMATION_SCHEMA.VIEWS {schema_filter}
+                    ORDER BY TABLE_SCHEMA, TABLE_NAME
+                """
+                df = client.run_query(query)
+                if df.is_empty():
+                    return f"No views found in {database}."
+                return df.to_pandas().to_markdown(index=False)
+
+        elif action == "get_sql_endpoint":
+            lh = lakehouse or __ctx_cache.get(f"{ctx.client_id}_lakehouse")
+            wh = warehouse or __ctx_cache.get(f"{ctx.client_id}_warehouse")
+            if not lh and not wh:
+                return "Either lakehouse or warehouse must be specified or set in context."
+
+            name, endpoint = await _resolve_sql_endpoint(
+                workspace=ws, lakehouse=lh, warehouse=wh, type=type,
+            )
+            return endpoint if endpoint else f"No SQL endpoint found."
+
         else:
-            # All table schemas
-            schemas = await client.get_all_schemas(
-                workspace, lakehouse, "lakehouse", credential
-            )
-            return schemas
+            return f"Error: Unknown action '{action}'. Use 'list', 'get_schema', 'get_views', or 'get_sql_endpoint'."
 
     except Exception as e:
-        return f"Error retrieving table schema: {str(e)}"
+        logger.error(f"Error managing tables: {str(e)}")
+        return f"Error managing tables: {str(e)}"
 
 
 @mcp.tool()
@@ -124,182 +170,41 @@ async def run_query(
     lakehouse: Optional[str] = None,
     warehouse: Optional[str] = None,
     query: str = None,
-    type: Optional[str] = None,  # Add type hint for 'type'
+    type: Optional[str] = None,
     ctx: Context = None,
 ) -> str:
-    """Read data from a table in a warehouse or lakehouse.
+    """Execute a SQL query against a Fabric warehouse or lakehouse.
 
     Args:
-        workspace: Name or ID of the workspace (optional).
-        lakehouse: Name or ID of the lakehouse (optional).
-        warehouse: Name or ID of the warehouse (optional).
+        workspace: Workspace name or ID (optional).
+        lakehouse: Lakehouse name or ID (optional).
+        warehouse: Warehouse name or ID (optional).
         query: The SQL query to execute.
-        type: Type of resource ('lakehouse' or 'warehouse'). If not provided, it will be inferred.
-        ctx: Context object containing client information.
+        type: Resource type ('lakehouse' or 'warehouse'). Inferred if not provided.
+        ctx: Context object.
+
     Returns:
-        A string confirming the data read or an error message.
+        Query results as a markdown table (first 10 rows).
     """
     try:
         if ctx is None:
             raise ValueError("Context (ctx) must be provided.")
         if query is None:
             raise ValueError("Query must be specified.")
-        # Always resolve the SQL endpoint and database name
-        database, sql_endpoint = await get_sql_endpoint(
-            workspace=workspace,
-            lakehouse=lakehouse,
-            warehouse=warehouse,
-            type=type,
+
+        database, sql_endpoint = await _resolve_sql_endpoint(
+            workspace=workspace, lakehouse=lakehouse, warehouse=warehouse, type=type,
         )
-        if (
-            not database
-            or not sql_endpoint
-            or sql_endpoint.startswith("Error")
-            or sql_endpoint.startswith("No SQL endpoint")
-        ):
+        if not database or not sql_endpoint or sql_endpoint.startswith("Error") or sql_endpoint.startswith("No SQL endpoint"):
             return f"Failed to resolve SQL endpoint: {sql_endpoint}"
+
         logger.info(f"Running query '{query}' on SQL endpoint {sql_endpoint}")
         client = SQLClient(sql_endpoint=sql_endpoint, database=database)
         df = client.run_query(query)
         if df.is_empty():
             return f"No data found for query '{query}'."
 
-        # Convert to markdown for user-friendly display
-
-        # markdown = f"### Query: {query} (shape: {df.shape})\n\n"
-        # with pl.Config() as cfg:
-        #     cfg.set_tbl_formatting('ASCII_MARKDOWN')
-        #     display(Markdown(repr(df)))
-        # markdown += f"\n\n### Data Preview:\n\n"
-        # markdown += df.head(10).to_pandas().to_markdown(index=False)
-        # markdown += f"\n\nColumns: {', '.join(df.columns)}"
         return df.head(10).to_pandas().to_markdown(index=False)
     except Exception as e:
         logger.error(f"Error reading data: {str(e)}")
         return f"Error reading data: {str(e)}"
-
-
-@mcp.tool()
-async def get_views(
-    workspace: Optional[str] = None,
-    lakehouse: Optional[str] = None,
-    warehouse: Optional[str] = None,
-    view_name: Optional[str] = None,
-    schema_name: Optional[str] = None,
-    type: Optional[str] = None,
-    ctx: Context = None,
-) -> str:
-    """List views or get the schema of a specific view in a lakehouse or warehouse.
-
-    If view_name is provided, returns the view's column definitions and full SQL definition.
-    If view_name is omitted, lists all views with a definition preview.
-
-    Args:
-        workspace: Name or ID of the workspace (optional).
-        lakehouse: Name or ID of the lakehouse (optional).
-        warehouse: Name or ID of the warehouse (optional).
-        view_name: Name of a specific view to get schema for (optional - omit to list all).
-        schema_name: Filter/scope by schema name (e.g., 'dbo'). Default 'dbo' when getting a specific view.
-        type: Type of resource ('lakehouse' or 'warehouse'). If not provided, it will be inferred.
-        ctx: Context object containing client information.
-
-    Returns:
-        A list of views or the detailed schema of a specific view.
-    """
-    try:
-        if ctx is None:
-            raise ValueError("Context (ctx) must be provided.")
-
-        # Resolve the SQL endpoint
-        database, sql_endpoint = await get_sql_endpoint(
-            workspace=workspace,
-            lakehouse=lakehouse,
-            warehouse=warehouse,
-            type=type,
-        )
-        if (
-            not database
-            or not sql_endpoint
-            or sql_endpoint.startswith("Error")
-            or sql_endpoint.startswith("No SQL endpoint")
-        ):
-            return f"Failed to resolve SQL endpoint: {sql_endpoint}"
-
-        client = SQLClient(sql_endpoint=sql_endpoint, database=database)
-
-        if view_name:
-            # Get specific view schema
-            effective_schema = schema_name or "dbo"
-            _validate_sql_identifier(effective_schema)
-            _validate_sql_identifier(view_name)
-
-            logger.info(f"Getting schema for view {effective_schema}.{view_name}")
-
-            # Get column information
-            columns_query = f"""
-                SELECT
-                    COLUMN_NAME,
-                    DATA_TYPE,
-                    CHARACTER_MAXIMUM_LENGTH,
-                    NUMERIC_PRECISION,
-                    NUMERIC_SCALE,
-                    IS_NULLABLE
-                FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_SCHEMA = '{effective_schema}'
-                  AND TABLE_NAME = '{view_name}'
-                ORDER BY ORDINAL_POSITION
-            """
-
-            columns_df = client.run_query(columns_query)
-
-            # Get view definition
-            definition_query = f"""
-                SELECT VIEW_DEFINITION
-                FROM INFORMATION_SCHEMA.VIEWS
-                WHERE TABLE_SCHEMA = '{effective_schema}'
-                  AND TABLE_NAME = '{view_name}'
-            """
-
-            definition_df = client.run_query(definition_query)
-
-            if columns_df.is_empty():
-                return f"View '{effective_schema}.{view_name}' not found."
-
-            result = f"## View: {effective_schema}.{view_name}\n\n"
-            result += "### Columns\n\n"
-            result += columns_df.to_pandas().to_markdown(index=False)
-            if not definition_df.is_empty():
-                definition = definition_df.to_pandas().iloc[0, 0]
-                result += f"\n\n### Definition\n\n```sql\n{definition}\n```"
-
-            return result
-
-        else:
-            # List all views
-            logger.info(f"Listing views from SQL endpoint {sql_endpoint}")
-
-            if schema_name:
-                _validate_sql_identifier(schema_name)
-                schema_filter = f"WHERE TABLE_SCHEMA = '{schema_name}'"
-            else:
-                schema_filter = ""
-            query = f"""
-                SELECT
-                    TABLE_SCHEMA as schema_name,
-                    TABLE_NAME as view_name,
-                    LEFT(VIEW_DEFINITION, 200) as definition_preview
-                FROM INFORMATION_SCHEMA.VIEWS
-                {schema_filter}
-                ORDER BY TABLE_SCHEMA, TABLE_NAME
-            """
-
-            df = client.run_query(query)
-
-            if df.is_empty():
-                return f"No views found in {database}."
-
-            return df.to_pandas().to_markdown(index=False)
-
-    except Exception as e:
-        logger.error(f"Error with views: {str(e)}")
-        return f"Error with views: {str(e)}"

@@ -20,163 +20,1083 @@ logger = get_logger(__name__)
 
 
 @mcp.tool()
-async def list_notebooks(workspace: Optional[str] = None, ctx: Context = None) -> str:
-    """List all notebooks in a Fabric workspace.
-
-    Args:
-        workspace: Name or ID of the workspace (optional)
-        ctx: Context object containing client information
-    Returns:
-        A string containing the list of notebooks or an error message.
-    """
-
-    try:
-        if ctx is None:
-            raise ValueError("Context (ctx) must be provided.")
-
-        fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
-        notebook_client = NotebookClient(fabric_client)
-
-        # Resolve workspace name to ID if needed
-        workspace_id = await fabric_client.resolve_workspace(workspace)
-
-        return await notebook_client.list_notebooks(workspace_id)
-    except Exception as e:
-        logger.error(f"Error listing notebooks: {str(e)}")
-        return f"Error listing notebooks: {str(e)}"
-
-
-@mcp.tool()
-async def create_notebook(
-    workspace: str,
-    notebook_name: str,
-    template_type: str = "basic",
+async def manage_notebook(
+    action: str,
+    workspace: Optional[str] = None,
+    notebook_name: Optional[str] = None,
+    notebook_id: Optional[str] = None,
+    template_type: Optional[str] = "basic",
+    cell_index: Optional[int] = None,
+    cell_content: Optional[str] = None,
+    cell_type: Optional[str] = "code",
+    code_type: Optional[str] = None,
+    operation: Optional[str] = None,
+    source_table: Optional[str] = None,
+    target_table: Optional[str] = None,
+    columns: Optional[str] = None,
+    filter_condition: Optional[str] = None,
+    lakehouse_name: Optional[str] = None,
+    code: Optional[str] = None,
     ctx: Context = None,
 ) -> str:
-    """Create a new notebook from a template in a Fabric workspace.
+    """Manage Fabric notebooks: list, create, read content, update cells, generate/validate code, and analyze performance.
 
     Args:
-        workspace: Name or ID of the workspace
-        notebook_name: Name of the new notebook
-        template_type: Template type to use:
-            PySpark templates: 'basic', 'etl', 'analytics', 'ml'
-            Fabric templates: 'fabric_integration', 'streaming'
+        action: Action to perform. One of:
+            - 'list': List all notebooks in a workspace
+            - 'create': Create a new notebook from a template
+            - 'get_content': Get the content of a specific notebook
+            - 'update_cell': Update a specific cell in a notebook
+            - 'generate_code': Generate PySpark or Fabric-specific code
+            - 'validate_code': Validate PySpark or Fabric code
+            - 'analyze_performance': Analyze a notebook for performance optimization
+        workspace: Name or ID of the workspace (optional for 'list', required for most actions)
+        notebook_name: Name of the notebook (required for 'create')
+        notebook_id: ID or name of the notebook (required for 'get_content', 'update_cell', 'analyze_performance')
+        template_type: Template type for 'create': 'basic', 'etl', 'analytics', 'ml', 'fabric_integration', 'streaming' (default: 'basic')
+        cell_index: Index of the cell to update, 0-based (required for 'update_cell')
+        cell_content: New content for the cell (required for 'update_cell')
+        cell_type: Type of cell for 'update_cell': 'code' or 'markdown' (default: 'code')
+        code_type: Type of code for 'generate_code'/'validate_code': 'pyspark' or 'fabric'
+        operation: Operation type for 'generate_code'.
+            PySpark ops: 'read_table', 'write_table', 'transform', 'join', 'aggregate', 'schema_inference', 'data_quality', 'performance_optimization'
+            Fabric ops: 'read_lakehouse', 'write_lakehouse', 'merge_delta', 'performance_monitor'
+        source_table: Source table name for 'generate_code' (format: lakehouse.table_name)
+        target_table: Target table name for 'generate_code' (format: lakehouse.table_name)
+        columns: Comma-separated list of columns for 'generate_code' (PySpark only)
+        filter_condition: Filter condition for 'generate_code' (PySpark only)
+        lakehouse_name: Name of the lakehouse for 'generate_code' (Fabric only)
+        code: Code to validate for 'validate_code'
         ctx: Context object containing client information
+
     Returns:
-        A string containing the ID of the created notebook or an error message.
+        A string containing the result of the action or an error message.
     """
-    try:
-        if ctx is None:
-            raise ValueError("Context (ctx) must be provided.")
 
-        # Fabric-specific templates use the helpers module
-        fabric_templates = {"fabric_integration", "streaming"}
+    # ── action: list ──────────────────────────────────────────────────
+    if action == "list":
+        try:
+            if ctx is None:
+                raise ValueError("Context (ctx) must be provided.")
 
-        if template_type in fabric_templates:
-            from helpers.pyspark_helpers import create_notebook_from_template
-            notebook_data = create_notebook_from_template(template_type)
-        else:
-            # PySpark templates defined inline
-            notebook_data = _get_pyspark_template(template_type)
-            if notebook_data is None:
-                all_templates = "basic, etl, analytics, ml, fabric_integration, streaming"
-                return f"Invalid template type '{template_type}'. Available templates: {all_templates}"
+            fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+            notebook_client = NotebookClient(fabric_client)
 
-        notebook_content = json.dumps(notebook_data, indent=2)
+            # Resolve workspace name to ID if needed
+            workspace_id = await fabric_client.resolve_workspace(workspace)
 
-        notebook_client = NotebookClient(
-            FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
-        )
-        response = await notebook_client.create_notebook(
-            workspace, notebook_name, notebook_content
-        )
+            return await notebook_client.list_notebooks(workspace_id)
+        except Exception as e:
+            logger.error(f"Error listing notebooks: {str(e)}")
+            return f"Error listing notebooks: {str(e)}"
 
-        if isinstance(response, dict) and response.get("id"):
-            return f"Created notebook '{notebook_name}' with ID: {response['id']} using '{template_type}' template"
-        else:
-            return f"Failed to create notebook: {response}"
+    # ── action: create ────────────────────────────────────────────────
+    elif action == "create":
+        try:
+            if ctx is None:
+                raise ValueError("Context (ctx) must be provided.")
+            if not notebook_name:
+                return "Error: 'notebook_name' is required for 'create' action."
+            if not workspace:
+                return "Error: 'workspace' is required for 'create' action."
 
-    except Exception as e:
-        logger.error(f"Error creating notebook: {str(e)}")
-        return f"Error creating notebook: {str(e)}"
+            # Fabric-specific templates use the helpers module
+            fabric_templates = {"fabric_integration", "streaming"}
+
+            if template_type in fabric_templates:
+                from helpers.pyspark_helpers import create_notebook_from_template
+                notebook_data = create_notebook_from_template(template_type)
+            else:
+                # PySpark templates defined inline
+                notebook_data = _get_pyspark_template(template_type)
+                if notebook_data is None:
+                    all_templates = "basic, etl, analytics, ml, fabric_integration, streaming"
+                    return f"Invalid template type '{template_type}'. Available templates: {all_templates}"
+
+            notebook_content = json.dumps(notebook_data, indent=2)
+
+            notebook_client = NotebookClient(
+                FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+            )
+            response = await notebook_client.create_notebook(
+                workspace, notebook_name, notebook_content
+            )
+
+            if isinstance(response, dict) and response.get("id"):
+                return f"Created notebook '{notebook_name}' with ID: {response['id']} using '{template_type}' template"
+            else:
+                return f"Failed to create notebook: {response}"
+
+        except Exception as e:
+            logger.error(f"Error creating notebook: {str(e)}")
+            return f"Error creating notebook: {str(e)}"
+
+    # ── action: get_content ───────────────────────────────────────────
+    elif action == "get_content":
+        try:
+            if ctx is None:
+                raise ValueError("Context (ctx) must be provided.")
+            if not notebook_id:
+                return "Error: 'notebook_id' is required for 'get_content' action."
+            if not workspace:
+                return "Error: 'workspace' is required for 'get_content' action."
+
+            fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+            notebook_client = NotebookClient(fabric_client)
+
+            # Resolve workspace ID if name provided
+            workspace_id = await fabric_client.resolve_workspace(workspace)
+
+            # Resolve notebook ID if name provided
+            if not _is_valid_uuid(notebook_id):
+                notebook_resolved_id = await fabric_client.resolve_item_id(
+                    item=notebook_id, type="Notebook", workspace=workspace_id
+                )
+            else:
+                notebook_resolved_id = notebook_id
+
+            # Get the notebook definition (actual content) using getDefinition endpoint
+            definition = await notebook_client.get_notebook_definition(workspace_id, notebook_resolved_id)
+
+            if isinstance(definition, str):  # Error message
+                return definition
+
+            # Extract and decode the notebook content from the definition
+            parts = definition.get("definition", {}).get("parts", [])
+
+            # Priority order: .ipynb first, then notebook-content.py (Fabric native format)
+            for part in parts:
+                path = part.get("path", "")
+                if path.endswith(".ipynb"):
+                    payload = part.get("payload", "")
+                    if payload:
+                        # Decode base64 content
+                        decoded_content = base64.b64decode(payload).decode("utf-8")
+                        return decoded_content
+
+            # Fallback to Fabric's native .py format (notebook-content.py)
+            for part in parts:
+                path = part.get("path", "")
+                if path == "notebook-content.py" or path.endswith(".py"):
+                    payload = part.get("payload", "")
+                    if payload:
+                        # Decode base64 content
+                        decoded_content = base64.b64decode(payload).decode("utf-8")
+                        return decoded_content
+
+            # If no content found, list available parts for debugging
+            if parts:
+                part_paths = [p.get("path", "unknown") for p in parts]
+                return f"No notebook content found. Available parts: {part_paths}"
+
+            return "No notebook content found in the definition."
+
+        except Exception as e:
+            logger.error(f"Error getting notebook content: {str(e)}")
+            return f"Error getting notebook content: {str(e)}"
+
+    # ── action: update_cell ───────────────────────────────────────────
+    elif action == "update_cell":
+        try:
+            if ctx is None:
+                raise ValueError("Context (ctx) must be provided.")
+            if not notebook_id:
+                return "Error: 'notebook_id' is required for 'update_cell' action."
+            if not workspace:
+                return "Error: 'workspace' is required for 'update_cell' action."
+            if cell_index is None:
+                return "Error: 'cell_index' is required for 'update_cell' action."
+            if not cell_content:
+                return "Error: 'cell_content' is required for 'update_cell' action."
+
+            fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+            notebook_client = NotebookClient(fabric_client)
+
+            # Resolve workspace ID
+            workspace_id = await fabric_client.resolve_workspace(workspace)
+
+            # Resolve notebook ID and get notebook name
+            if not _is_valid_uuid(notebook_id):
+                nb_name = notebook_id
+                notebook_resolved_id = await fabric_client.resolve_item_id(
+                    item=notebook_id, type="Notebook", workspace=workspace_id
+                )
+            else:
+                notebook_resolved_id = notebook_id
+                # Get notebook metadata to get the name
+                notebook_meta = await notebook_client.get_notebook(workspace_id, notebook_resolved_id)
+                if isinstance(notebook_meta, dict):
+                    nb_name = notebook_meta.get("displayName", "notebook")
+                else:
+                    nb_name = "notebook"
+
+            # Get the raw notebook definition to determine format
+            definition = await notebook_client.get_notebook_definition(workspace_id, notebook_resolved_id)
+
+            if isinstance(definition, str):
+                return f"Error getting notebook definition: {definition}"
+
+            if definition is None:
+                return "Error: Failed to get notebook definition (API returned None)"
+
+            # Extract parts from the definition
+            parts = definition.get("definition", {}).get("parts", [])
+
+            if not parts:
+                return "Error: Notebook definition has no parts"
+
+            # Determine the notebook format and find the content
+            notebook_format = None
+            content_part = None
+            content_path = None
+
+            for part in parts:
+                path = part.get("path", "")
+                if path.endswith(".ipynb"):
+                    notebook_format = "ipynb"
+                    content_part = part
+                    content_path = path
+                    break
+                elif path == "notebook-content.py" or path.endswith(".py"):
+                    notebook_format = "py"
+                    content_part = part
+                    content_path = path
+
+            if content_part is None:
+                part_paths = [p.get("path", "unknown") for p in parts]
+                return f"Error: No notebook content found. Available parts: {part_paths}"
+
+            # Decode the content
+            payload = content_part.get("payload", "")
+            if not payload:
+                return "Error: Notebook content payload is empty"
+
+            try:
+                decoded_content = base64.b64decode(payload).decode("utf-8")
+            except Exception as e:
+                return f"Error decoding notebook content: {str(e)}"
+
+            # Parse content based on format
+            if notebook_format == "ipynb":
+                try:
+                    notebook_data = json.loads(decoded_content)
+                    cells = notebook_data.get("cells", [])
+                except json.JSONDecodeError as e:
+                    return f"Error parsing notebook JSON: {str(e)}"
+            else:
+                # Parse Fabric's native .py format
+                cells = _parse_fabric_py_to_cells(decoded_content)
+                # Create a minimal notebook structure
+                notebook_data = {
+                    "nbformat": 4,
+                    "nbformat_minor": 5,
+                    "metadata": {"language_info": {"name": "python"}},
+                    "cells": cells
+                }
+
+            if not cells:
+                return "Error: Notebook has no cells"
+
+            if cell_index < 0 or cell_index >= len(cells):
+                return f"Cell index {cell_index} is out of range. Notebook has {len(cells)} cells (0-{len(cells)-1})."
+
+            # Prepare source as list of lines (ipynb format)
+            if isinstance(cell_content, str):
+                source_lines = cell_content.split('\n')
+                # Add newline to all lines except the last
+                source_lines = [line + '\n' if i < len(source_lines) - 1 else line
+                               for i, line in enumerate(source_lines)]
+            else:
+                source_lines = cell_content
+
+            # Update the cell, preserving existing metadata where possible
+            existing_cell = cells[cell_index]
+            cells[cell_index] = {
+                "cell_type": cell_type,
+                "source": source_lines,
+                "metadata": existing_cell.get("metadata", {}),
+            }
+
+            # Add code-specific fields
+            if cell_type == "code":
+                cells[cell_index]["execution_count"] = None
+                cells[cell_index]["outputs"] = []
+
+            # Update notebook data
+            notebook_data["cells"] = cells
+
+            # Serialize back to the original format
+            # Always use ipynb format for updateDefinition as it's more reliable
+            updated_content = json.dumps(notebook_data, indent=2)
+
+            # Call the update API
+            result = await notebook_client.update_notebook_definition(
+                workspace=workspace_id,
+                notebook_id=notebook_resolved_id,
+                content=updated_content,
+                notebook_name=nb_name,
+            )
+
+            # Check for errors in the result
+            if result is None:
+                return "Error: Update API returned None - the operation may have failed"
+
+            if isinstance(result, dict) and "error" in result:
+                return f"Error updating notebook: {result['error']}"
+
+            return f"Successfully updated cell {cell_index} in notebook '{nb_name}' with {cell_type} content ({len(cell_content)} characters)."
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing notebook JSON: {str(e)}")
+            return f"Error parsing notebook content: {str(e)}"
+        except Exception as e:
+            logger.error(f"Error updating notebook cell: {str(e)}")
+            return f"Error updating notebook cell: {str(e)}"
+
+    # ── action: generate_code ─────────────────────────────────────────
+    elif action == "generate_code":
+        try:
+            if not code_type:
+                return "Error: 'code_type' is required for 'generate_code' action. Use 'pyspark' or 'fabric'."
+            if not operation:
+                return "Error: 'operation' is required for 'generate_code' action."
+
+            if code_type == "fabric":
+                # Fabric-specific code generation
+                from helpers.pyspark_helpers import PySparkCodeGenerator
+                generator = PySparkCodeGenerator()
+
+                if operation == "read_lakehouse":
+                    if not lakehouse_name or not source_table:
+                        return "Error: lakehouse_name and source_table are required for read_lakehouse operation"
+                    code_result = generator.generate_fabric_lakehouse_reader(lakehouse_name, source_table)
+                elif operation == "write_lakehouse":
+                    if not target_table:
+                        return "Error: target_table is required for write_lakehouse operation"
+                    code_result = generator.generate_fabric_lakehouse_writer(target_table)
+                elif operation == "merge_delta":
+                    if not target_table:
+                        return "Error: target_table is required for merge_delta operation"
+                    code_result = generator.generate_delta_merge_operation(target_table, "new_df", "target.id = source.id")
+                elif operation == "performance_monitor":
+                    code_result = generator.generate_performance_monitoring()
+                else:
+                    available_ops = "read_lakehouse, write_lakehouse, merge_delta, performance_monitor"
+                    return f"Invalid Fabric operation. Available operations: {available_ops}"
+
+                return f"""```python\n{code_result}\n```\n\n**Generated Fabric-specific PySpark code for '{operation}' operation**"""
+
+            else:
+                # PySpark code generation
+                code_templates = {
+                    "read_table": f"""# Read data from table\ndf = spark.table("{source_table or 'lakehouse.table_name'}")\ndf.show()\ndf.printSchema()""",
+                    "write_table": f"""# Write data to table\ndf.write \\\n    .format("delta") \\\n    .mode("overwrite") \\\n    .saveAsTable("{target_table or 'lakehouse.output_table'}")\n\nprint(f"Successfully wrote {{df.count()}} records to {target_table or 'lakehouse.output_table'}")""",
+                    "transform": f"""# Data transformation\nfrom pyspark.sql.functions import *\n\ndf_transformed = df \\\n    .select({columns or '*'}) \\\n    {f'.filter({filter_condition})' if filter_condition else ''} \\\n    .withColumn("processed_date", current_timestamp())\n\ndf_transformed.show()""",
+                    "join": f"""# Join tables\ndf1 = spark.table("{source_table or 'lakehouse.table1'}")\ndf2 = spark.table("{target_table or 'lakehouse.table2'}")\n\n# Inner join (modify join condition as needed)\ndf_joined = df1.join(df2, df1.id == df2.id, "inner")\n\ndf_joined.show()""",
+                    "aggregate": f"""# Data aggregation\nfrom pyspark.sql.functions import *\n\ndf_agg = df \\\n    .groupBy({columns or '"column1"'}) \\\n    .agg(\n        count("*").alias("count"),\n        sum("amount").alias("total_amount"),\n        avg("amount").alias("avg_amount"),\n        max("date").alias("max_date")\n    ) \\\n    .orderBy(desc("total_amount"))\n\ndf_agg.show()""",
+                    "schema_inference": """# Schema inference and data profiling\nprint("=== Schema Information ===")\ndf.printSchema()\n\nprint("\\n=== Data Profile ===")\nprint(f"Record count: {df.count()}")\nprint(f"Column count: {len(df.columns)}")\n\nprint("\\n=== Column Statistics ===")\ndf.describe().show()""",
+                    "data_quality": """# Data quality checks\nfrom pyspark.sql.functions import *\n\nprint("=== Data Quality Report ===")\n\n# Check for duplicates\nduplicate_count = df.count() - df.distinct().count()\nprint(f"Duplicate rows: {duplicate_count}")\n\n# Check for null values\ntotal_rows = df.count()\nfor column in df.columns:\n    null_count = df.filter(col(column).isNull()).count()\n    null_percentage = (null_count / total_rows) * 100\n    print(f"{column}: {null_count} nulls ({null_percentage:.2f}%)")""",
+                    "performance_optimization": f"""# Performance optimization techniques\n\n# 1. Cache frequently used DataFrames\ndf.cache()\nprint(f"Cached DataFrame with {{df.count()}} records")\n\n# 2. Repartition for better parallelism\noptimal_partitions = spark.sparkContext.defaultParallelism * 2\ndf_repartitioned = df.repartition(optimal_partitions)\n\n# 3. Use broadcast for small dimension tables (< 200MB)\nfrom pyspark.sql.functions import broadcast\n# df_joined = large_df.join(broadcast(small_df), "key")\n\n# 4. Optimize file formats - use Delta Lake\ndf.write \\\n    .format("delta") \\\n    .mode("overwrite") \\\n    .option("optimizeWrite", "true") \\\n    .option("autoOptimize", "true") \\\n    .saveAsTable("{target_table or 'lakehouse.optimized_table'}")\n\n# 5. Show execution plan\ndf.explain(True)""",
+                }
+
+                if operation not in code_templates:
+                    available_ops = ", ".join(code_templates.keys())
+                    return f"Invalid PySpark operation. Available operations: {available_ops}"
+
+                generated_code = code_templates[operation]
+
+                return f"""```python\n{generated_code}\n```\n\n**Generated PySpark code for '{operation}' operation**\n\nRemember to replace placeholder table names and adjust column names as needed."""
+
+        except Exception as e:
+            logger.error(f"Error generating code: {str(e)}")
+            return f"Error generating code: {str(e)}"
+
+    # ── action: validate_code ─────────────────────────────────────────
+    elif action == "validate_code":
+        try:
+            if not code:
+                return "Error: 'code' is required for 'validate_code' action."
+
+            validation_code_type = code_type or "pyspark"
+
+            validation_results = []
+            warnings = []
+            suggestions = []
+
+            # Basic syntax validation (both types)
+            try:
+                compile(code, '<string>', 'exec')
+                validation_results.append("Syntax validation: PASSED")
+            except SyntaxError as e:
+                return f"Syntax validation: FAILED - {e}"
+
+            if validation_code_type == "fabric":
+                # Fabric-specific validation
+                from helpers.pyspark_helpers import PySparkValidator
+                validator = PySparkValidator()
+
+                fabric_results = validator.validate_fabric_compatibility(code)
+                performance_results = validator.check_performance_patterns(code)
+
+                if 'spark.table(' in code:
+                    validation_results.append("Using Fabric managed tables")
+                if 'notebookutils' in code:
+                    validation_results.append("Using Fabric notebook utilities")
+                if 'format("delta")' in code:
+                    validation_results.append("Using Delta Lake format")
+
+                if 'spark.sql("USE' in code:
+                    warnings.append("Explicit USE statements may not be necessary in Fabric")
+                if 'hdfs://' in code or 's3://' in code:
+                    warnings.append("Direct file system paths detected - consider using Fabric's managed storage")
+
+                warnings.extend(performance_results.get("warnings", []))
+                suggestions.extend(fabric_results.get("issues", []))
+                suggestions.extend(fabric_results.get("suggestions", []))
+                suggestions.extend(performance_results.get("optimizations", []))
+
+            else:
+                # PySpark best practices checks
+                lines = code.split('\n')
+
+                has_spark_imports = any('from pyspark' in line or 'import pyspark' in line for line in lines)
+                if not has_spark_imports:
+                    warnings.append("No PySpark imports detected. Add: from pyspark.sql import SparkSession")
+
+                has_df_operations = any('df.' in line or '.show()' in line for line in lines)
+                if has_df_operations:
+                    validation_results.append("DataFrame operations detected")
+
+                if '.collect()' in code:
+                    warnings.append(".collect() detected - avoid on large datasets, use .show() or .take() instead")
+                if '.toPandas()' in code:
+                    warnings.append(".toPandas() detected - ensure dataset fits in driver memory")
+                if 'for row in df.collect()' in code:
+                    warnings.append("Anti-pattern: iterating over collected DataFrame. Use DataFrame operations instead")
+
+                df_count = code.count('df.')
+                if df_count > 3 and '.cache()' not in code and '.persist()' not in code:
+                    suggestions.append("Consider caching DataFrame with .cache() for repeated operations")
+                if 'createDataFrame' in code and 'StructType' not in code:
+                    suggestions.append("Consider defining explicit schema when creating DataFrames")
+                if '.filter(' in code and 'isNull' not in code and 'isNotNull' not in code:
+                    suggestions.append("Consider adding null value handling in filters")
+                if '.write.' in code and 'partitionBy' not in code:
+                    suggestions.append("Consider partitioning data when writing large datasets")
+                if '.write.' in code and 'format("delta")' not in code:
+                    suggestions.append("Consider using Delta Lake format for ACID transactions and time travel")
+
+            # Compile results
+            title = "Fabric" if validation_code_type == "fabric" else "PySpark"
+            result = f"# {title} Code Validation Report\n\n"
+            result += "## Validation Results\n"
+            result += "\n".join(f"- {r}" for r in validation_results) + "\n\n"
+
+            if warnings:
+                result += "## Warnings\n"
+                result += "\n".join(f"- {w}" for w in warnings) + "\n\n"
+
+            if suggestions:
+                result += "## Optimization Suggestions\n"
+                result += "\n".join(f"- {s}" for s in suggestions) + "\n\n"
+
+            if not warnings and not suggestions:
+                result += "## Summary\nCode looks good! No issues detected.\n"
+            else:
+                result += f"## Summary\nFound {len(warnings)} warnings and {len(suggestions)} optimization opportunities.\n"
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error validating code: {str(e)}")
+            return f"Error validating code: {str(e)}"
+
+    # ── action: analyze_performance ───────────────────────────────────
+    elif action == "analyze_performance":
+        try:
+            if ctx is None:
+                raise ValueError("Context (ctx) must be provided.")
+            if not notebook_id:
+                return "Error: 'notebook_id' is required for 'analyze_performance' action."
+            if not workspace:
+                return "Error: 'workspace' is required for 'analyze_performance' action."
+
+            # Get notebook content via the get_content action
+            notebook_content = await manage_notebook(
+                action="get_content",
+                workspace=workspace,
+                notebook_id=notebook_id,
+                ctx=ctx,
+            )
+
+            if notebook_content.startswith("Error"):
+                return notebook_content
+
+            # Parse notebook and extract code cells
+            notebook_data = json.loads(notebook_content)
+            cells = notebook_data.get("cells", [])
+
+            code_cells = [cell for cell in cells if cell.get("cell_type") == "code"]
+
+            if not code_cells:
+                return "No code cells found in the notebook."
+
+            # Analyze each code cell
+            analysis_results = []
+            total_operations = 0
+            performance_issues = []
+            optimization_opportunities = []
+
+            from helpers.pyspark_helpers import PySparkValidator
+            validator = PySparkValidator()
+
+            for i, cell in enumerate(code_cells):
+                cell_source = "\n".join(cell.get("source", []))
+
+                if not cell_source.strip():
+                    continue
+
+                analysis_results.append(f"### Cell {i + 1}")
+
+                # Count operations
+                operations = [
+                    ("DataFrame reads", cell_source.count("spark.read") + cell_source.count("spark.table")),
+                    ("DataFrame writes", cell_source.count(".write.")),
+                    ("Transformations", cell_source.count(".withColumn") + cell_source.count(".select") + cell_source.count(".filter")),
+                    ("Actions", cell_source.count(".show()") + cell_source.count(".count()") + cell_source.count(".collect()"))
+                ]
+
+                for op_name, count in operations:
+                    if count > 0:
+                        analysis_results.append(f"- {op_name}: {count}")
+                        total_operations += count
+
+                # Check for performance patterns
+                perf_results = validator.check_performance_patterns(cell_source)
+                performance_issues.extend(perf_results["warnings"])
+                optimization_opportunities.extend(perf_results["optimizations"])
+
+                # Fabric-specific analysis
+                fabric_results = validator.validate_fabric_compatibility(cell_source)
+                optimization_opportunities.extend(fabric_results["suggestions"])
+
+            # Generate comprehensive report
+            report = f"# Notebook Performance Analysis Report\n\n"
+            report += f"**Notebook:** {notebook_id}\n"
+            report += f"**Total Code Cells:** {len(code_cells)}\n"
+            report += f"**Total Operations:** {total_operations}\n\n"
+
+            if analysis_results:
+                report += "## Cell-by-Cell Analysis\n"
+                report += "\n".join(analysis_results) + "\n\n"
+
+            if performance_issues:
+                report += "## Performance Issues Found\n"
+                for issue in set(performance_issues):  # Remove duplicates
+                    report += f"- {issue}\n"
+                report += "\n"
+
+            if optimization_opportunities:
+                report += "## Optimization Opportunities\n"
+                for opportunity in set(optimization_opportunities):  # Remove duplicates
+                    report += f"- {opportunity}\n"
+                report += "\n"
+
+            # Performance score calculation
+            score = 100
+            score -= len(set(performance_issues)) * 10  # -10 points per unique issue
+            score -= len(set(optimization_opportunities)) * 5  # -5 points per optimization opportunity
+            score = max(score, 0)  # Ensure score doesn't go negative
+
+            report += f"## Performance Score: {score}/100\n\n"
+
+            if score >= 80:
+                report += "Excellent - Your notebook is well-optimized for Fabric!\n"
+            elif score >= 60:
+                report += "Good - Some optimization opportunities exist.\n"
+            elif score >= 40:
+                report += "Needs Improvement - Several performance issues should be addressed.\n"
+            else:
+                report += "Poor - Significant performance optimization required.\n"
+
+            return report
+
+        except Exception as e:
+            logger.error(f"Error analyzing notebook performance: {str(e)}")
+            return f"Error analyzing notebook performance: {str(e)}"
+
+    else:
+        return f"Invalid action '{action}'. Valid actions: list, create, get_content, update_cell, generate_code, validate_code, analyze_performance"
 
 
 @mcp.tool()
-async def get_notebook_content(
-    workspace: str,
-    notebook_id: str,
-    ctx: Context = None
+async def manage_spark_jobs(
+    action: str,
+    workspace: Optional[str] = None,
+    notebook: Optional[str] = None,
+    job_id: Optional[str] = None,
+    scope: Optional[str] = "workspace",
+    state: Optional[str] = None,
+    item_type: Optional[str] = None,
+    limit: Optional[int] = 50,
+    ctx: Context = None,
 ) -> str:
-    """Get the content of a specific notebook in a Fabric workspace.
-
-    This retrieves the actual notebook script/code by calling the getDefinition
-    endpoint, which returns the full notebook content including all cells.
+    """Manage Spark job executions (Livy sessions): list jobs or get job details.
 
     Args:
-        workspace: Name or ID of the workspace
-        notebook_id: ID or name of the notebook
+        action: Action to perform. One of:
+            - 'list': List Spark job executions
+            - 'get_details': Get detailed information about a specific Spark job
+        workspace: Workspace name or ID (uses context if not provided).
+            For scope='all', use comma-separated list or omit for all workspaces.
+        notebook: Notebook name or ID (optional for 'list' to filter; required for 'get_details')
+        job_id: Livy session ID (required for 'get_details')
+        scope: 'workspace' (single workspace, default) or 'all' (all accessible workspaces) - 'list' only
+        state: Filter by job state: NotStarted, InProgress, Cancelled, Failed, Succeeded - 'list' only
+        item_type: Filter by item type: Notebook, SparkJobDefinition, Lakehouse - 'list' only (scope='all')
+        limit: Maximum number of jobs to return per workspace (default: 50) - 'list' only
         ctx: Context object containing client information
+
     Returns:
-        A string containing the notebook content in JSON format or an error message.
+        Formatted Spark job information or an error message.
     """
-    try:
-        if ctx is None:
-            raise ValueError("Context (ctx) must be provided.")
 
-        fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
-        notebook_client = NotebookClient(fabric_client)
+    # ── action: list ──────────────────────────────────────────────────
+    if action == "list":
+        import asyncio
 
-        # Resolve workspace ID if name provided
-        workspace_id = await fabric_client.resolve_workspace(workspace)
+        try:
+            if ctx is None:
+                raise ValueError("Context (ctx) must be provided.")
 
-        # Resolve notebook ID if name provided
-        if not _is_valid_uuid(notebook_id):
-            notebook_resolved_id = await fabric_client.resolve_item_id(
-                item=notebook_id, type="Notebook", workspace=workspace_id
+            fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+            spark_client = SparkClient(fabric_client)
+
+            if scope == "all":
+                # Multi-workspace mode
+                if workspace and workspace.lower() != 'all':
+                    workspace_names = [w.strip() for w in workspace.split(',')]
+                    workspace_list = []
+                    for ws_name in workspace_names:
+                        try:
+                            ws_id = await fabric_client.resolve_workspace(ws_name)
+                            workspace_list.append((ws_id, ws_name))
+                        except Exception as e:
+                            logger.warning(f"Could not resolve workspace '{ws_name}': {e}")
+                else:
+                    all_workspaces = await fabric_client.get_workspaces()
+                    workspace_list = [(w.get('id'), w.get('displayName')) for w in all_workspaces]
+
+                if not workspace_list:
+                    return "No workspaces found or accessible."
+
+                all_jobs = []
+                workspace_errors = []
+
+                async def fetch_workspace_jobs(ws_id: str, ws_name: str):
+                    try:
+                        filters = {}
+                        if state:
+                            filters["state"] = state
+                        sessions = await spark_client.list_workspace_sessions(ws_id, filters, max_results=limit)
+                        if sessions:
+                            if item_type:
+                                sessions = [s for s in sessions if s.get("itemType") == item_type]
+                            for s in sessions[:limit]:
+                                s['_workspace_id'] = ws_id
+                                s['_workspace_name'] = ws_name
+                            return sessions[:limit], None
+                        return [], None
+                    except Exception as e:
+                        return [], f"{ws_name}: {str(e)}"
+
+                tasks = [fetch_workspace_jobs(ws_id, ws_name) for ws_id, ws_name in workspace_list]
+                results = await asyncio.gather(*tasks)
+
+                for jobs, error in results:
+                    if error:
+                        workspace_errors.append(error)
+                    else:
+                        all_jobs.extend(jobs)
+
+                all_jobs.sort(key=lambda x: x.get('submittedDateTime', ''), reverse=True)
+
+                if not all_jobs:
+                    filter_info = []
+                    if state:
+                        filter_info.append(f"state='{state}'")
+                    if item_type:
+                        filter_info.append(f"type='{item_type}'")
+                    filter_msg = f" (filters: {', '.join(filter_info)})" if filter_info else ""
+                    return f"No Spark jobs found across {len(workspace_list)} workspaces{filter_msg}."
+
+                markdown = f"# Spark Jobs Across Workspaces\n\n"
+                markdown += f"**Workspaces queried:** {len(workspace_list)}\n"
+                if state:
+                    markdown += f"**State filter:** {state}\n"
+                if item_type:
+                    markdown += f"**Item type filter:** {item_type}\n"
+                markdown += "\n"
+
+                markdown += "| Workspace | Item Name | Type | State | Submitted | Duration | Livy ID |\n"
+                markdown += "|-----------|-----------|------|-------|-----------|----------|--------|\n"
+
+                failed_jobs = []
+                for session in all_jobs:
+                    ws_name = session.get("_workspace_name", "Unknown")
+                    item_name = session.get("itemName", "N/A")
+                    item_info = session.get("item", {})
+                    item_id = item_info.get("id", "") if isinstance(item_info, dict) else ""
+                    item_type_val = session.get("itemType", "N/A")
+                    job_state = session.get("state", "Unknown")
+                    submitted_time = session.get("submittedDateTime", "N/A")
+                    livy_id = session.get("livyId", "N/A")
+
+                    if job_state == "Failed":
+                        failed_jobs.append({"workspace": ws_name, "item_name": item_name, "item_id": item_id, "livy_id": livy_id})
+
+                    if submitted_time and submitted_time != "N/A":
+                        try:
+                            dt = datetime.fromisoformat(submitted_time.replace("Z", "+00:00"))
+                            submitted_time = dt.strftime("%m-%d %H:%M")
+                        except Exception:
+                            pass
+
+                    duration = session.get("totalDuration", "N/A")
+                    status_emoji = {"Succeeded": "✅", "Failed": "❌", "InProgress": "⏳", "NotStarted": "⏸️", "Cancelled": "🚫"}.get(job_state, "")
+                    short_job_id = str(livy_id)[:8] + "..." if len(str(livy_id)) > 12 else livy_id
+                    short_ws = ws_name[:15] + "..." if len(ws_name) > 18 else ws_name
+
+                    markdown += f"| {short_ws} | {item_name} | {item_type_val} | {status_emoji} {job_state} | {submitted_time} | {duration} | `{short_job_id}` |\n"
+
+                markdown += f"\n**Total jobs:** {len(all_jobs)}\n"
+
+                if failed_jobs:
+                    markdown += f"\n## Failed Jobs ({len(failed_jobs)})\n\n"
+                    for fj in failed_jobs[:10]:
+                        markdown += f"- **{fj['item_name']}** in `{fj['workspace']}`\n"
+                        markdown += f"  - Livy ID: `{fj['livy_id']}`\n"
+
+                # Summary statistics
+                state_counts = {}
+                for s in all_jobs:
+                    st = s.get("state", "Unknown")
+                    state_counts[st] = state_counts.get(st, 0) + 1
+
+                if len(state_counts) > 1:
+                    markdown += "\n**By state:** "
+                    markdown += ", ".join([f"{k}: {v}" for k, v in sorted(state_counts.items())])
+                    markdown += "\n"
+
+                if workspace_errors:
+                    markdown += f"\n**Errors ({len(workspace_errors)}):**\n"
+                    for err in workspace_errors[:5]:
+                        markdown += f"- {err}\n"
+
+                return markdown
+
+            else:
+                # Single workspace mode
+                ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
+                if not ws:
+                    return "Workspace not set. Use set_context('workspace', ...) or provide workspace parameter."
+
+                workspace_id = await fabric_client.resolve_workspace(ws)
+
+                filters = {}
+                if state:
+                    filters["state"] = state
+
+                if notebook:
+                    if not _is_valid_uuid(notebook):
+                        notebook_resolved_id = await fabric_client.resolve_item_id(
+                            item=notebook, type="Notebook", workspace=workspace_id
+                        )
+                    else:
+                        notebook_resolved_id = notebook
+
+                    sessions = await spark_client.list_notebook_sessions(workspace_id, notebook_resolved_id)
+                    if state and sessions:
+                        sessions = [s for s in sessions if s.get("state") == state]
+                else:
+                    sessions = await spark_client.list_workspace_sessions(workspace_id, filters)
+
+                if not sessions:
+                    filter_msg = f" with state '{state}'" if state else ""
+                    notebook_msg = f" for notebook '{notebook}'" if notebook else ""
+                    return f"No Spark jobs found{notebook_msg}{filter_msg} in workspace '{ws}'."
+
+                markdown = f"# Spark Jobs in workspace '{ws}'\n\n"
+                if notebook:
+                    markdown = f"# Spark Jobs for notebook '{notebook}' in workspace '{ws}'\n\n"
+                if state:
+                    markdown += f"**Filtered by state:** {state}\n\n"
+
+                markdown += "| Livy ID | Item Name | Type | State | Submitted | Duration | Operation |\n"
+                markdown += "|---------|-----------|------|-------|-----------|----------|----------|\n"
+
+                failed_jobs = []
+                for session in sessions:
+                    livy_id = session.get("livyId", "N/A")
+                    item_name = session.get("itemName", "N/A")
+                    item_info = session.get("item", {})
+                    item_id = item_info.get("id", "") if isinstance(item_info, dict) else ""
+                    item_type_val = session.get("itemType", "N/A")
+                    job_state = session.get("state", "Unknown")
+                    submitted_time = session.get("submittedDateTime", "N/A")
+                    operation_name = session.get("operationName", "N/A")
+
+                    if job_state == "Failed":
+                        failed_jobs.append({"item_name": item_name, "item_id": item_id, "livy_id": livy_id})
+
+                    if submitted_time and submitted_time != "N/A":
+                        try:
+                            dt = datetime.fromisoformat(submitted_time.replace("Z", "+00:00"))
+                            submitted_time = dt.strftime("%Y-%m-%d %H:%M")
+                        except Exception:
+                            pass
+
+                    duration = session.get("totalDuration")
+                    if not duration:
+                        if submitted_time != "N/A":
+                            try:
+                                submitted_dt = datetime.fromisoformat(session.get("submittedDateTime", "").replace("Z", "+00:00"))
+                                end_time = session.get("endDateTime")
+                                if end_time:
+                                    end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+                                    duration_seconds = (end_dt - submitted_dt).total_seconds()
+                                    duration = f"{int(duration_seconds // 60)}m {int(duration_seconds % 60)}s"
+                                elif job_state in ["InProgress", "NotStarted"]:
+                                    now_dt = datetime.now(submitted_dt.tzinfo)
+                                    duration_seconds = (now_dt - submitted_dt).total_seconds()
+                                    duration = f"{int(duration_seconds // 60)}m {int(duration_seconds % 60)}s"
+                            except Exception:
+                                duration = "N/A"
+                        else:
+                            duration = "N/A"
+
+                    status_emoji = {"Succeeded": "✅", "Failed": "❌", "InProgress": "⏳", "NotStarted": "⏸️", "Cancelled": "🚫"}.get(job_state, "")
+                    short_job_id = str(livy_id)[:8] + "..." if len(str(livy_id)) > 12 else livy_id
+
+                    markdown += f"| `{short_job_id}` | {item_name} | {item_type_val} | {status_emoji} {job_state} | {submitted_time} | {duration} | {operation_name} |\n"
+
+                markdown += f"\n**Total jobs:** {len(sessions)}\n"
+
+                state_counts = {}
+                for s in sessions:
+                    st = s.get("state", "Unknown")
+                    state_counts[st] = state_counts.get(st, 0) + 1
+
+                if len(state_counts) > 1:
+                    markdown += "\n**By state:** "
+                    markdown += ", ".join([f"{k}: {v}" for k, v in sorted(state_counts.items())])
+                    markdown += "\n"
+
+                if failed_jobs:
+                    markdown += f"\n## Failed Jobs ({len(failed_jobs)})\n\n"
+                    markdown += "To get error details, use `manage_spark_jobs` with action='get_details', the Livy ID, and notebook:\n\n"
+                    for fj in failed_jobs[:10]:
+                        markdown += f"- **{fj['item_name']}**\n"
+                        markdown += f"  - Livy ID: `{fj['livy_id']}`\n"
+
+                return markdown
+
+        except Exception as e:
+            logger.error(f"Error listing Spark jobs: {str(e)}")
+            return f"Error listing Spark jobs: {str(e)}"
+
+    # ── action: get_details ───────────────────────────────────────────
+    elif action == "get_details":
+        try:
+            if ctx is None:
+                raise ValueError("Context (ctx) must be provided.")
+
+            if not job_id:
+                return "Error: 'job_id' is required for 'get_details' action."
+
+            if not notebook:
+                return "Error: 'notebook' parameter is required to get job details."
+
+            fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+            spark_client = SparkClient(fabric_client)
+
+            # Resolve workspace
+            ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
+            if not ws:
+                return "Workspace not set. Please set a workspace using 'set_workspace' command."
+
+            workspace_id = await fabric_client.resolve_workspace(ws)
+
+            # Resolve notebook ID
+            if not _is_valid_uuid(notebook):
+                notebook_resolved_id = await fabric_client.resolve_item_id(
+                    item=notebook, type="Notebook", workspace=workspace_id
+                )
+            else:
+                notebook_resolved_id = notebook
+
+            # Get session details
+            session = await spark_client.get_session_details(workspace_id, notebook_resolved_id, job_id)
+
+            if not session:
+                return f"No job found with ID '{job_id}' for notebook '{notebook}' in workspace '{ws}'."
+
+            # Log the raw session for debugging
+            logger.debug(f"Raw session data: {json.dumps(session, indent=2, default=str)}")
+
+            # Enrich session with resolved names (capacity name, workspace name, etc.)
+            try:
+                session = await spark_client.enrich_session_with_names(session)
+            except Exception as e:
+                logger.warning(f"Failed to enrich session with names: {e}")
+
+            # Get notebook metadata to get the display name
+            notebook_client = NotebookClient(fabric_client)
+            notebook_meta = await notebook_client.get_notebook(workspace_id, notebook_resolved_id)
+
+            # Resolve notebook name - try multiple sources (API field is 'itemName')
+            nb_name = session.get('itemName')
+            if not nb_name and isinstance(notebook_meta, dict):
+                nb_name = notebook_meta.get("displayName")
+            if not nb_name:
+                nb_name = notebook
+
+            # Get item info from session
+            item_info = session.get('item', {})
+            item_id = item_info.get('id', notebook_resolved_id)
+            job_instance_id = session.get('jobInstanceId')
+
+            # Status information
+            job_state = session.get('state', 'Unknown')
+            status_emoji = {
+                "Succeeded": "✅",
+                "Failed": "❌",
+                "InProgress": "⏳",
+                "NotStarted": "⏸️",
+                "Cancelled": "🚫",
+                "Unknown": "❓"
+            }.get(job_state, "")
+
+            # Format detailed information
+            markdown = f"# Spark Job: {nb_name}\n\n"
+            markdown += f"**Status:** {status_emoji} {job_state}\n"
+            markdown += f"**Operation:** {session.get('operationName', 'N/A')}\n"
+            markdown += f"**Workspace:** {ws}\n\n"
+
+            # Timing information - compact format
+            submitted = session.get('submittedDateTime', 'N/A')
+            started = session.get('startDateTime', 'N/A')
+            ended = session.get('endDateTime', 'N/A')
+            total_duration = session.get('totalDuration')
+
+            markdown += f"## Timing\n"
+            markdown += f"| | |\n|---|---|\n"
+            markdown += f"| Submitted | {submitted} |\n"
+            markdown += f"| Started | {started} |\n"
+            markdown += f"| Ended | {ended} |\n"
+
+            # Show duration
+            if total_duration:
+                markdown += f"| **Duration** | **{total_duration}** |\n"
+            elif submitted != 'N/A' and ended != 'N/A':
+                try:
+                    submitted_dt = datetime.fromisoformat(submitted.replace("Z", "+00:00"))
+                    ended_dt = datetime.fromisoformat(ended.replace("Z", "+00:00"))
+                    duration_seconds = (ended_dt - submitted_dt).total_seconds()
+                    mins = int(duration_seconds // 60)
+                    secs = int(duration_seconds % 60)
+                    markdown += f"| **Duration** | **{mins}m {secs}s** |\n"
+                except Exception:
+                    pass
+
+            # Submitter information - simplified
+            submitter = session.get('submitter', {})
+            submitter_name = (
+                submitter.get('displayName') or
+                submitter.get('userPrincipalName') or
+                submitter.get('mail') or
+                submitter.get('name')
             )
-        else:
-            notebook_resolved_id = notebook_id
+            if submitter_name:
+                markdown += f"\n**Submitted by:** {submitter_name}\n"
+            elif submitter.get('id'):
+                markdown += f"\n**Submitted by:** `{submitter.get('id')}`\n"
 
-        # Get the notebook definition (actual content) using getDefinition endpoint
-        definition = await notebook_client.get_notebook_definition(workspace_id, notebook_resolved_id)
+            # Cancellation reason if applicable
+            if job_state == "Cancelled":
+                cancellation_reason = session.get('cancellationReason')
+                if cancellation_reason:
+                    markdown += f"\n**Cancellation Reason:** {cancellation_reason}\n"
 
-        if isinstance(definition, str):  # Error message
-            return definition
+            # Spark Application link
+            spark_app_id = session.get('sparkApplicationId')
+            if spark_app_id:
+                markdown += f"\n**Spark UI:** [Open Spark Application](https://app.fabric.microsoft.com/groups/{workspace_id}/sparkapplication/{spark_app_id})\n"
 
-        # Extract and decode the notebook content from the definition
-        parts = definition.get("definition", {}).get("parts", [])
+            # Error information if failed
+            job_instance = None
+            if job_state == "Failed":
+                markdown += f"\n## Error Information\n"
 
-        # Priority order: .ipynb first, then notebook-content.py (Fabric native format)
-        for part in parts:
-            path = part.get("path", "")
-            if path.endswith(".ipynb"):
-                payload = part.get("payload", "")
-                if payload:
-                    # Decode base64 content
-                    decoded_content = base64.b64decode(payload).decode("utf-8")
-                    return decoded_content
+                # Try to get detailed error from job instance API
+                if job_instance_id:
+                    job_instance = await spark_client.get_job_instance(workspace_id, notebook_resolved_id, job_instance_id)
+                    if job_instance:
+                        logger.debug(f"Job instance data: {json.dumps(job_instance, indent=2, default=str)}")
+                        failure_reason = (
+                            job_instance.get('failureReason') or
+                            job_instance.get('errorMessage') or
+                            job_instance.get('error') or
+                            job_instance.get('message')
+                        )
+                        if failure_reason:
+                            markdown += f"**Failure Reason:**\n```\n{failure_reason}\n```\n\n"
 
-        # Fallback to Fabric's native .py format (notebook-content.py)
-        for part in parts:
-            path = part.get("path", "")
-            if path == "notebook-content.py" or path.endswith(".py"):
-                payload = part.get("payload", "")
-                if payload:
-                    # Decode base64 content
-                    decoded_content = base64.b64decode(payload).decode("utf-8")
-                    return decoded_content
+                        root_activity_id = job_instance.get('rootActivityId')
+                        if root_activity_id:
+                            markdown += f"**Root Activity ID:** `{root_activity_id}`\n"
 
-        # If no content found, list available parts for debugging
-        if parts:
-            part_paths = [p.get("path", "unknown") for p in parts]
-            return f"No notebook content found. Available parts: {part_paths}"
+                # Include any errors from the session response
+                errors = session.get('errors') or session.get('error') or []
+                if isinstance(errors, dict):
+                    errors = [errors]
+                if errors:
+                    markdown += f"\n**Error Details:**\n"
+                    for error in errors:
+                        if isinstance(error, str):
+                            markdown += f"```\n{error}\n```\n"
+                        else:
+                            error_code = error.get('errorCode') or error.get('code') or 'Unknown'
+                            error_message = error.get('message') or error.get('errorMessage') or 'No message'
+                            error_source = error.get('source') or ''
+                            markdown += f"- **{error_code}**"
+                            if error_source:
+                                markdown += f" (Source: {error_source})"
+                            markdown += f"\n  ```\n  {error_message}\n  ```\n"
 
-        return "No notebook content found in the definition."
+                # If no specific errors found
+                has_failure_info = bool(errors) or (job_instance and (job_instance.get('failureReason') or job_instance.get('errorMessage')))
+                if not has_failure_info:
+                    markdown += "\n*No detailed error information available from the API.*\n"
+                    markdown += "*Check the Spark logs in the Fabric portal for more details.*\n"
 
-    except Exception as e:
-        logger.error(f"Error getting notebook content: {str(e)}")
-        return f"Error getting notebook content: {str(e)}"
+            # Links section
+            markdown += f"\n## Links\n"
+            markdown += f"- [Open Notebook](https://app.fabric.microsoft.com/groups/{workspace_id}/notebooks/{notebook_resolved_id})\n"
+            if job_instance_id:
+                markdown += f"- [View in Monitoring Hub](https://app.fabric.microsoft.com/groups/{workspace_id}/monitoringhub?experience=fabric-developer&jobId={job_instance_id})\n"
 
+            return markdown
+
+        except Exception as e:
+            logger.error(f"Error getting job details: {str(e)}")
+            return f"Error getting job details: {str(e)}"
+
+    else:
+        return f"Invalid action '{action}'. Valid actions: list, get_details"
+
+
+# ===== HELPER FUNCTIONS =====
 
 def _get_pyspark_template(template_type: str) -> Optional[dict]:
     """Get a PySpark notebook template by type.
@@ -580,192 +1500,6 @@ def _get_pyspark_template(template_type: str) -> Optional[dict]:
         },
     }
 
-@mcp.tool()
-async def generate_notebook_code(
-    code_type: str,
-    operation: str,
-    source_table: Optional[str] = None,
-    target_table: Optional[str] = None,
-    columns: Optional[str] = None,
-    filter_condition: Optional[str] = None,
-    lakehouse_name: Optional[str] = None,
-    ctx: Context = None,
-) -> str:
-    """Generate PySpark or Fabric-specific code for common operations.
-
-    Args:
-        code_type: Type of code to generate: 'pyspark' or 'fabric'
-        operation: Type of operation.
-            PySpark ops: 'read_table', 'write_table', 'transform', 'join', 'aggregate',
-                        'schema_inference', 'data_quality', 'performance_optimization'
-            Fabric ops: 'read_lakehouse', 'write_lakehouse', 'merge_delta', 'performance_monitor'
-        source_table: Source table name (format: lakehouse.table_name)
-        target_table: Target table name (format: lakehouse.table_name)
-        columns: Comma-separated list of columns (PySpark only)
-        filter_condition: Filter condition for data (PySpark only)
-        lakehouse_name: Name of the lakehouse (Fabric only)
-        ctx: Context object containing client information
-    Returns:
-        A string containing the generated code or an error message.
-    """
-    try:
-        if code_type == "fabric":
-            # Fabric-specific code generation
-            from helpers.pyspark_helpers import PySparkCodeGenerator
-            generator = PySparkCodeGenerator()
-
-            if operation == "read_lakehouse":
-                if not lakehouse_name or not source_table:
-                    return "Error: lakehouse_name and source_table are required for read_lakehouse operation"
-                code = generator.generate_fabric_lakehouse_reader(lakehouse_name, source_table)
-            elif operation == "write_lakehouse":
-                if not target_table:
-                    return "Error: target_table is required for write_lakehouse operation"
-                code = generator.generate_fabric_lakehouse_writer(target_table)
-            elif operation == "merge_delta":
-                if not target_table:
-                    return "Error: target_table is required for merge_delta operation"
-                code = generator.generate_delta_merge_operation(target_table, "new_df", "target.id = source.id")
-            elif operation == "performance_monitor":
-                code = generator.generate_performance_monitoring()
-            else:
-                available_ops = "read_lakehouse, write_lakehouse, merge_delta, performance_monitor"
-                return f"Invalid Fabric operation. Available operations: {available_ops}"
-
-            return f"""```python\n{code}\n```\n\n**Generated Fabric-specific PySpark code for '{operation}' operation**"""
-
-        else:
-            # PySpark code generation
-            code_templates = {
-                "read_table": f"""# Read data from table\ndf = spark.table("{source_table or 'lakehouse.table_name'}")\ndf.show()\ndf.printSchema()""",
-                "write_table": f"""# Write data to table\ndf.write \\\n    .format("delta") \\\n    .mode("overwrite") \\\n    .saveAsTable("{target_table or 'lakehouse.output_table'}")\n\nprint(f"Successfully wrote {{df.count()}} records to {target_table or 'lakehouse.output_table'}")""",
-                "transform": f"""# Data transformation\nfrom pyspark.sql.functions import *\n\ndf_transformed = df \\\n    .select({columns or '*'}) \\\n    {f'.filter({filter_condition})' if filter_condition else ''} \\\n    .withColumn("processed_date", current_timestamp())\n\ndf_transformed.show()""",
-                "join": f"""# Join tables\ndf1 = spark.table("{source_table or 'lakehouse.table1'}")\ndf2 = spark.table("{target_table or 'lakehouse.table2'}")\n\n# Inner join (modify join condition as needed)\ndf_joined = df1.join(df2, df1.id == df2.id, "inner")\n\ndf_joined.show()""",
-                "aggregate": f"""# Data aggregation\nfrom pyspark.sql.functions import *\n\ndf_agg = df \\\n    .groupBy({columns or '"column1"'}) \\\n    .agg(\n        count("*").alias("count"),\n        sum("amount").alias("total_amount"),\n        avg("amount").alias("avg_amount"),\n        max("date").alias("max_date")\n    ) \\\n    .orderBy(desc("total_amount"))\n\ndf_agg.show()""",
-                "schema_inference": """# Schema inference and data profiling\nprint("=== Schema Information ===")\ndf.printSchema()\n\nprint("\\n=== Data Profile ===")\nprint(f"Record count: {df.count()}")\nprint(f"Column count: {len(df.columns)}")\n\nprint("\\n=== Column Statistics ===")\ndf.describe().show()""",
-                "data_quality": """# Data quality checks\nfrom pyspark.sql.functions import *\n\nprint("=== Data Quality Report ===")\n\n# Check for duplicates\nduplicate_count = df.count() - df.distinct().count()\nprint(f"Duplicate rows: {duplicate_count}")\n\n# Check for null values\ntotal_rows = df.count()\nfor column in df.columns:\n    null_count = df.filter(col(column).isNull()).count()\n    null_percentage = (null_count / total_rows) * 100\n    print(f"{column}: {null_count} nulls ({null_percentage:.2f}%)")""",
-                "performance_optimization": f"""# Performance optimization techniques\n\n# 1. Cache frequently used DataFrames\ndf.cache()\nprint(f"Cached DataFrame with {{df.count()}} records")\n\n# 2. Repartition for better parallelism\noptimal_partitions = spark.sparkContext.defaultParallelism * 2\ndf_repartitioned = df.repartition(optimal_partitions)\n\n# 3. Use broadcast for small dimension tables (< 200MB)\nfrom pyspark.sql.functions import broadcast\n# df_joined = large_df.join(broadcast(small_df), "key")\n\n# 4. Optimize file formats - use Delta Lake\ndf.write \\\n    .format("delta") \\\n    .mode("overwrite") \\\n    .option("optimizeWrite", "true") \\\n    .option("autoOptimize", "true") \\\n    .saveAsTable("{target_table or 'lakehouse.optimized_table'}")\n\n# 5. Show execution plan\ndf.explain(True)""",
-            }
-
-            if operation not in code_templates:
-                available_ops = ", ".join(code_templates.keys())
-                return f"Invalid PySpark operation. Available operations: {available_ops}"
-
-            generated_code = code_templates[operation]
-
-            return f"""```python\n{generated_code}\n```\n\n**Generated PySpark code for '{operation}' operation**\n\nRemember to replace placeholder table names and adjust column names as needed."""
-
-    except Exception as e:
-        logger.error(f"Error generating code: {str(e)}")
-        return f"Error generating code: {str(e)}"
-
-@mcp.tool()
-async def validate_notebook_code(
-    code: str,
-    code_type: str = "pyspark",
-    ctx: Context = None,
-) -> str:
-    """Validate PySpark or Fabric code for syntax, best practices, and compatibility.
-
-    Args:
-        code: Code to validate
-        code_type: Type of validation: 'pyspark' (basic checks) or 'fabric' (Fabric-specific checks)
-        ctx: Context object containing client information
-    Returns:
-        A string containing validation results and suggestions.
-    """
-    try:
-        validation_results = []
-        warnings = []
-        suggestions = []
-
-        # Basic syntax validation (both types)
-        try:
-            compile(code, '<string>', 'exec')
-            validation_results.append("Syntax validation: PASSED")
-        except SyntaxError as e:
-            return f"Syntax validation: FAILED - {e}"
-
-        if code_type == "fabric":
-            # Fabric-specific validation
-            from helpers.pyspark_helpers import PySparkValidator
-            validator = PySparkValidator()
-
-            fabric_results = validator.validate_fabric_compatibility(code)
-            performance_results = validator.check_performance_patterns(code)
-
-            if 'spark.table(' in code:
-                validation_results.append("Using Fabric managed tables")
-            if 'notebookutils' in code:
-                validation_results.append("Using Fabric notebook utilities")
-            if 'format("delta")' in code:
-                validation_results.append("Using Delta Lake format")
-
-            if 'spark.sql("USE' in code:
-                warnings.append("Explicit USE statements may not be necessary in Fabric")
-            if 'hdfs://' in code or 's3://' in code:
-                warnings.append("Direct file system paths detected - consider using Fabric's managed storage")
-
-            warnings.extend(performance_results.get("warnings", []))
-            suggestions.extend(fabric_results.get("issues", []))
-            suggestions.extend(fabric_results.get("suggestions", []))
-            suggestions.extend(performance_results.get("optimizations", []))
-
-        else:
-            # PySpark best practices checks
-            lines = code.split('\n')
-
-            has_spark_imports = any('from pyspark' in line or 'import pyspark' in line for line in lines)
-            if not has_spark_imports:
-                warnings.append("No PySpark imports detected. Add: from pyspark.sql import SparkSession")
-
-            has_df_operations = any('df.' in line or '.show()' in line for line in lines)
-            if has_df_operations:
-                validation_results.append("DataFrame operations detected")
-
-            if '.collect()' in code:
-                warnings.append(".collect() detected - avoid on large datasets, use .show() or .take() instead")
-            if '.toPandas()' in code:
-                warnings.append(".toPandas() detected - ensure dataset fits in driver memory")
-            if 'for row in df.collect()' in code:
-                warnings.append("Anti-pattern: iterating over collected DataFrame. Use DataFrame operations instead")
-
-            df_count = code.count('df.')
-            if df_count > 3 and '.cache()' not in code and '.persist()' not in code:
-                suggestions.append("Consider caching DataFrame with .cache() for repeated operations")
-            if 'createDataFrame' in code and 'StructType' not in code:
-                suggestions.append("Consider defining explicit schema when creating DataFrames")
-            if '.filter(' in code and 'isNull' not in code and 'isNotNull' not in code:
-                suggestions.append("Consider adding null value handling in filters")
-            if '.write.' in code and 'partitionBy' not in code:
-                suggestions.append("Consider partitioning data when writing large datasets")
-            if '.write.' in code and 'format("delta")' not in code:
-                suggestions.append("Consider using Delta Lake format for ACID transactions and time travel")
-
-        # Compile results
-        title = "Fabric" if code_type == "fabric" else "PySpark"
-        result = f"# {title} Code Validation Report\n\n"
-        result += "## Validation Results\n"
-        result += "\n".join(f"- {r}" for r in validation_results) + "\n\n"
-
-        if warnings:
-            result += "## Warnings\n"
-            result += "\n".join(f"- {w}" for w in warnings) + "\n\n"
-
-        if suggestions:
-            result += "## Optimization Suggestions\n"
-            result += "\n".join(f"- {s}" for s in suggestions) + "\n\n"
-
-        if not warnings and not suggestions:
-            result += "## Summary\nCode looks good! No issues detected.\n"
-        else:
-            result += f"## Summary\nFound {len(warnings)} warnings and {len(suggestions)} optimization opportunities.\n"
-
-        return result
-
-    except Exception as e:
-        logger.error(f"Error validating code: {str(e)}")
-        return f"Error validating code: {str(e)}"
 
 def _parse_fabric_py_to_cells(py_content: str) -> List[Dict[str, Any]]:
     """Parse Fabric's native notebook-content.py format into cells.
@@ -942,975 +1676,3 @@ def _cells_to_fabric_py(cells: List[Dict[str, Any]]) -> str:
             output_lines.append("")
 
     return '\n'.join(output_lines)
-
-
-@mcp.tool()
-async def update_notebook_cell(
-    workspace: str,
-    notebook_id: str,
-    cell_index: int,
-    cell_content: str,
-    cell_type: str = "code",
-    ctx: Context = None,
-) -> str:
-    """Update a specific cell in a notebook.
-
-    Args:
-        workspace: Name or ID of the workspace
-        notebook_id: ID or name of the notebook
-        cell_index: Index of the cell to update (0-based)
-        cell_content: New content for the cell
-        cell_type: Type of cell ('code' or 'markdown')
-        ctx: Context object containing client information
-    Returns:
-        A string confirming the update or an error message.
-    """
-    try:
-        if ctx is None:
-            raise ValueError("Context (ctx) must be provided.")
-
-        fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
-        notebook_client = NotebookClient(fabric_client)
-
-        # Resolve workspace ID
-        workspace_id = await fabric_client.resolve_workspace(workspace)
-
-        # Resolve notebook ID and get notebook name
-        if not _is_valid_uuid(notebook_id):
-            notebook_name = notebook_id
-            notebook_resolved_id = await fabric_client.resolve_item_id(
-                item=notebook_id, type="Notebook", workspace=workspace_id
-            )
-        else:
-            notebook_resolved_id = notebook_id
-            # Get notebook metadata to get the name
-            notebook_meta = await notebook_client.get_notebook(workspace_id, notebook_resolved_id)
-            if isinstance(notebook_meta, dict):
-                notebook_name = notebook_meta.get("displayName", "notebook")
-            else:
-                notebook_name = "notebook"
-
-        # Get the raw notebook definition to determine format
-        definition = await notebook_client.get_notebook_definition(workspace_id, notebook_resolved_id)
-
-        if isinstance(definition, str):
-            return f"Error getting notebook definition: {definition}"
-
-        if definition is None:
-            return "Error: Failed to get notebook definition (API returned None)"
-
-        # Extract parts from the definition
-        parts = definition.get("definition", {}).get("parts", [])
-
-        if not parts:
-            return "Error: Notebook definition has no parts"
-
-        # Determine the notebook format and find the content
-        notebook_format = None
-        content_part = None
-        content_path = None
-
-        for part in parts:
-            path = part.get("path", "")
-            if path.endswith(".ipynb"):
-                notebook_format = "ipynb"
-                content_part = part
-                content_path = path
-                break
-            elif path == "notebook-content.py" or path.endswith(".py"):
-                notebook_format = "py"
-                content_part = part
-                content_path = path
-
-        if content_part is None:
-            part_paths = [p.get("path", "unknown") for p in parts]
-            return f"Error: No notebook content found. Available parts: {part_paths}"
-
-        # Decode the content
-        payload = content_part.get("payload", "")
-        if not payload:
-            return "Error: Notebook content payload is empty"
-
-        try:
-            decoded_content = base64.b64decode(payload).decode("utf-8")
-        except Exception as e:
-            return f"Error decoding notebook content: {str(e)}"
-
-        # Parse content based on format
-        if notebook_format == "ipynb":
-            try:
-                notebook_data = json.loads(decoded_content)
-                cells = notebook_data.get("cells", [])
-            except json.JSONDecodeError as e:
-                return f"Error parsing notebook JSON: {str(e)}"
-        else:
-            # Parse Fabric's native .py format
-            cells = _parse_fabric_py_to_cells(decoded_content)
-            # Create a minimal notebook structure
-            notebook_data = {
-                "nbformat": 4,
-                "nbformat_minor": 5,
-                "metadata": {"language_info": {"name": "python"}},
-                "cells": cells
-            }
-
-        if not cells:
-            return "Error: Notebook has no cells"
-
-        if cell_index < 0 or cell_index >= len(cells):
-            return f"Cell index {cell_index} is out of range. Notebook has {len(cells)} cells (0-{len(cells)-1})."
-
-        # Prepare source as list of lines (ipynb format)
-        if isinstance(cell_content, str):
-            source_lines = cell_content.split('\n')
-            # Add newline to all lines except the last
-            source_lines = [line + '\n' if i < len(source_lines) - 1 else line
-                           for i, line in enumerate(source_lines)]
-        else:
-            source_lines = cell_content
-
-        # Update the cell, preserving existing metadata where possible
-        existing_cell = cells[cell_index]
-        cells[cell_index] = {
-            "cell_type": cell_type,
-            "source": source_lines,
-            "metadata": existing_cell.get("metadata", {}),
-        }
-
-        # Add code-specific fields
-        if cell_type == "code":
-            cells[cell_index]["execution_count"] = None
-            cells[cell_index]["outputs"] = []
-
-        # Update notebook data
-        notebook_data["cells"] = cells
-
-        # Serialize back to the original format
-        # Always use ipynb format for updateDefinition as it's more reliable
-        updated_content = json.dumps(notebook_data, indent=2)
-
-        # Call the update API
-        result = await notebook_client.update_notebook_definition(
-            workspace=workspace_id,
-            notebook_id=notebook_resolved_id,
-            content=updated_content,
-            notebook_name=notebook_name,
-        )
-
-        # Check for errors in the result
-        if result is None:
-            return "Error: Update API returned None - the operation may have failed"
-
-        if isinstance(result, dict) and "error" in result:
-            return f"Error updating notebook: {result['error']}"
-
-        return f"Successfully updated cell {cell_index} in notebook '{notebook_name}' with {cell_type} content ({len(cell_content)} characters)."
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Error parsing notebook JSON: {str(e)}")
-        return f"Error parsing notebook content: {str(e)}"
-    except Exception as e:
-        logger.error(f"Error updating notebook cell: {str(e)}")
-        return f"Error updating notebook cell: {str(e)}"
-
-@mcp.tool()
-async def analyze_notebook_performance(
-    workspace: str,
-    notebook_id: str,
-    ctx: Context = None,
-) -> str:
-    """Analyze a notebook's code for performance optimization opportunities in Fabric.
-
-    Args:
-        workspace: Name or ID of the workspace
-        notebook_id: ID or name of the notebook
-        ctx: Context object containing client information
-    Returns:
-        A string containing performance analysis and optimization recommendations.
-    """
-    try:
-        if ctx is None:
-            raise ValueError("Context (ctx) must be provided.")
-
-        # Get notebook content
-        notebook_content = await get_notebook_content(workspace, notebook_id, ctx)
-        
-        if notebook_content.startswith("Error"):
-            return notebook_content
-        
-        # Parse notebook and extract code cells
-        notebook_data = json.loads(notebook_content)
-        cells = notebook_data.get("cells", [])
-        
-        code_cells = [cell for cell in cells if cell.get("cell_type") == "code"]
-        
-        if not code_cells:
-            return "No code cells found in the notebook."
-        
-        # Analyze each code cell
-        analysis_results = []
-        total_operations = 0
-        performance_issues = []
-        optimization_opportunities = []
-        
-        from helpers.pyspark_helpers import PySparkValidator
-        validator = PySparkValidator()
-        
-        for i, cell in enumerate(code_cells):
-            cell_source = "\n".join(cell.get("source", []))
-            
-            if not cell_source.strip():
-                continue
-                
-            analysis_results.append(f"### Cell {i + 1}")
-            
-            # Count operations
-            operations = [
-                ("DataFrame reads", cell_source.count("spark.read") + cell_source.count("spark.table")),
-                ("DataFrame writes", cell_source.count(".write.")),
-                ("Transformations", cell_source.count(".withColumn") + cell_source.count(".select") + cell_source.count(".filter")),
-                ("Actions", cell_source.count(".show()") + cell_source.count(".count()") + cell_source.count(".collect()"))
-            ]
-            
-            for op_name, count in operations:
-                if count > 0:
-                    analysis_results.append(f"- {op_name}: {count}")
-                    total_operations += count
-            
-            # Check for performance patterns
-            perf_results = validator.check_performance_patterns(cell_source)
-            performance_issues.extend(perf_results["warnings"])
-            optimization_opportunities.extend(perf_results["optimizations"])
-            
-            # Fabric-specific analysis
-            fabric_results = validator.validate_fabric_compatibility(cell_source)
-            optimization_opportunities.extend(fabric_results["suggestions"])
-        
-        # Generate comprehensive report
-        report = f"# Notebook Performance Analysis Report\n\n"
-        report += f"**Notebook:** {notebook_id}\n"
-        report += f"**Total Code Cells:** {len(code_cells)}\n"
-        report += f"**Total Operations:** {total_operations}\n\n"
-        
-        if analysis_results:
-            report += "## Cell-by-Cell Analysis\n"
-            report += "\n".join(analysis_results) + "\n\n"
-        
-        if performance_issues:
-            report += "## Performance Issues Found\n"
-            for issue in set(performance_issues):  # Remove duplicates
-                report += f"- {issue}\n"
-            report += "\n"
-        
-        if optimization_opportunities:
-            report += "## Optimization Opportunities\n"
-            for opportunity in set(optimization_opportunities):  # Remove duplicates
-                report += f"- {opportunity}\n"
-            report += "\n"
-        
-        # Performance score calculation
-        score = 100
-        score -= len(set(performance_issues)) * 10  # -10 points per unique issue
-        score -= len(set(optimization_opportunities)) * 5  # -5 points per optimization opportunity
-        score = max(score, 0)  # Ensure score doesn't go negative
-        
-        report += f"## Performance Score: {score}/100\n\n"
-        
-        if score >= 80:
-            report += "✅ **Excellent** - Your notebook is well-optimized for Fabric!\n"
-        elif score >= 60:
-            report += "⚠️ **Good** - Some optimization opportunities exist.\n"
-        elif score >= 40:
-            report += "🔧 **Needs Improvement** - Several performance issues should be addressed.\n"
-        else:
-            report += "❌ **Poor** - Significant performance optimization required.\n"
-        
-        return report
-        
-    except Exception as e:
-        logger.error(f"Error analyzing notebook performance: {str(e)}")
-        return f"Error analyzing notebook performance: {str(e)}"
-
-
-@mcp.tool()
-async def list_spark_jobs(
-    workspace: Optional[str] = None,
-    notebook: Optional[str] = None,
-    scope: str = "workspace",
-    state: Optional[str] = None,
-    item_type: Optional[str] = None,
-    limit: int = 50,
-    ctx: Context = None
-) -> str:
-    """List Spark job executions (Livy sessions).
-
-    Args:
-        workspace: Workspace name or ID (uses context if not provided).
-            For scope='all', use comma-separated list or omit for all workspaces.
-        notebook: Notebook name or ID (optional - if provided, lists only that notebook's jobs)
-        scope: 'workspace' (single workspace, default) or 'all' (all accessible workspaces)
-        state: Filter by job state: NotStarted, InProgress, Cancelled, Failed, Succeeded (optional)
-        item_type: Filter by item type: Notebook, SparkJobDefinition, Lakehouse (optional, scope='all' only)
-        limit: Maximum number of jobs to return per workspace (default: 50)
-        ctx: Context object containing client information
-
-    Returns:
-        Formatted list of Spark jobs with status, runtime, item name, and submitter information
-    """
-    import asyncio
-
-    try:
-        if ctx is None:
-            raise ValueError("Context (ctx) must be provided.")
-
-        fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
-        spark_client = SparkClient(fabric_client)
-
-        if scope == "all":
-            # Multi-workspace mode
-            if workspace and workspace.lower() != 'all':
-                workspace_names = [w.strip() for w in workspace.split(',')]
-                workspace_list = []
-                for ws_name in workspace_names:
-                    try:
-                        ws_id = await fabric_client.resolve_workspace(ws_name)
-                        workspace_list.append((ws_id, ws_name))
-                    except Exception as e:
-                        logger.warning(f"Could not resolve workspace '{ws_name}': {e}")
-            else:
-                all_workspaces = await fabric_client.get_workspaces()
-                workspace_list = [(w.get('id'), w.get('displayName')) for w in all_workspaces]
-
-            if not workspace_list:
-                return "No workspaces found or accessible."
-
-            all_jobs = []
-            workspace_errors = []
-
-            async def fetch_workspace_jobs(ws_id: str, ws_name: str):
-                try:
-                    filters = {}
-                    if state:
-                        filters["state"] = state
-                    sessions = await spark_client.list_workspace_sessions(ws_id, filters, max_results=limit)
-                    if sessions:
-                        if item_type:
-                            sessions = [s for s in sessions if s.get("itemType") == item_type]
-                        for s in sessions[:limit]:
-                            s['_workspace_id'] = ws_id
-                            s['_workspace_name'] = ws_name
-                        return sessions[:limit], None
-                    return [], None
-                except Exception as e:
-                    return [], f"{ws_name}: {str(e)}"
-
-            tasks = [fetch_workspace_jobs(ws_id, ws_name) for ws_id, ws_name in workspace_list]
-            results = await asyncio.gather(*tasks)
-
-            for jobs, error in results:
-                if error:
-                    workspace_errors.append(error)
-                else:
-                    all_jobs.extend(jobs)
-
-            all_jobs.sort(key=lambda x: x.get('submittedDateTime', ''), reverse=True)
-
-            if not all_jobs:
-                filter_info = []
-                if state:
-                    filter_info.append(f"state='{state}'")
-                if item_type:
-                    filter_info.append(f"type='{item_type}'")
-                filter_msg = f" (filters: {', '.join(filter_info)})" if filter_info else ""
-                return f"No Spark jobs found across {len(workspace_list)} workspaces{filter_msg}."
-
-            markdown = f"# Spark Jobs Across Workspaces\n\n"
-            markdown += f"**Workspaces queried:** {len(workspace_list)}\n"
-            if state:
-                markdown += f"**State filter:** {state}\n"
-            if item_type:
-                markdown += f"**Item type filter:** {item_type}\n"
-            markdown += "\n"
-
-            markdown += "| Workspace | Item Name | Type | State | Submitted | Duration | Livy ID |\n"
-            markdown += "|-----------|-----------|------|-------|-----------|----------|--------|\n"
-
-            failed_jobs = []
-            for session in all_jobs:
-                ws_name = session.get("_workspace_name", "Unknown")
-                item_name = session.get("itemName", "N/A")
-                item_info = session.get("item", {})
-                item_id = item_info.get("id", "") if isinstance(item_info, dict) else ""
-                item_type_val = session.get("itemType", "N/A")
-                job_state = session.get("state", "Unknown")
-                submitted_time = session.get("submittedDateTime", "N/A")
-                job_id = session.get("livyId", "N/A")
-
-                if job_state == "Failed":
-                    failed_jobs.append({"workspace": ws_name, "item_name": item_name, "item_id": item_id, "livy_id": job_id})
-
-                if submitted_time and submitted_time != "N/A":
-                    try:
-                        dt = datetime.fromisoformat(submitted_time.replace("Z", "+00:00"))
-                        submitted_time = dt.strftime("%m-%d %H:%M")
-                    except Exception:
-                        pass
-
-                duration = session.get("totalDuration", "N/A")
-                status_emoji = {"Succeeded": "✅", "Failed": "❌", "InProgress": "⏳", "NotStarted": "⏸️", "Cancelled": "🚫"}.get(job_state, "")
-                short_job_id = str(job_id)[:8] + "..." if len(str(job_id)) > 12 else job_id
-                short_ws = ws_name[:15] + "..." if len(ws_name) > 18 else ws_name
-
-                markdown += f"| {short_ws} | {item_name} | {item_type_val} | {status_emoji} {job_state} | {submitted_time} | {duration} | `{short_job_id}` |\n"
-
-            markdown += f"\n**Total jobs:** {len(all_jobs)}\n"
-
-            if failed_jobs:
-                markdown += f"\n## Failed Jobs ({len(failed_jobs)})\n\n"
-                for fj in failed_jobs[:10]:
-                    markdown += f"- **{fj['item_name']}** in `{fj['workspace']}`\n"
-                    markdown += f"  - Livy ID: `{fj['livy_id']}`\n"
-
-            # Summary statistics
-            state_counts = {}
-            for s in all_jobs:
-                st = s.get("state", "Unknown")
-                state_counts[st] = state_counts.get(st, 0) + 1
-
-            if len(state_counts) > 1:
-                markdown += "\n**By state:** "
-                markdown += ", ".join([f"{k}: {v}" for k, v in sorted(state_counts.items())])
-                markdown += "\n"
-
-            if workspace_errors:
-                markdown += f"\n**Errors ({len(workspace_errors)}):**\n"
-                for err in workspace_errors[:5]:
-                    markdown += f"- {err}\n"
-
-            return markdown
-
-        else:
-            # Single workspace mode
-            ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
-            if not ws:
-                return "Workspace not set. Use set_context('workspace', ...) or provide workspace parameter."
-
-            workspace_id = await fabric_client.resolve_workspace(ws)
-
-            filters = {}
-            if state:
-                filters["state"] = state
-
-            if notebook:
-                if not _is_valid_uuid(notebook):
-                    notebook_id = await fabric_client.resolve_item_id(
-                        item=notebook, type="Notebook", workspace=workspace_id
-                    )
-                else:
-                    notebook_id = notebook
-
-                sessions = await spark_client.list_notebook_sessions(workspace_id, notebook_id)
-                if state and sessions:
-                    sessions = [s for s in sessions if s.get("state") == state]
-            else:
-                sessions = await spark_client.list_workspace_sessions(workspace_id, filters)
-
-            if not sessions:
-                filter_msg = f" with state '{state}'" if state else ""
-                notebook_msg = f" for notebook '{notebook}'" if notebook else ""
-                return f"No Spark jobs found{notebook_msg}{filter_msg} in workspace '{ws}'."
-
-            markdown = f"# Spark Jobs in workspace '{ws}'\n\n"
-            if notebook:
-                markdown = f"# Spark Jobs for notebook '{notebook}' in workspace '{ws}'\n\n"
-            if state:
-                markdown += f"**Filtered by state:** {state}\n\n"
-
-            markdown += "| Livy ID | Item Name | Type | State | Submitted | Duration | Operation |\n"
-            markdown += "|---------|-----------|------|-------|-----------|----------|----------|\n"
-
-            failed_jobs = []
-            for session in sessions:
-                job_id = session.get("livyId", "N/A")
-                item_name = session.get("itemName", "N/A")
-                item_info = session.get("item", {})
-                item_id = item_info.get("id", "") if isinstance(item_info, dict) else ""
-                item_type_val = session.get("itemType", "N/A")
-                job_state = session.get("state", "Unknown")
-                submitted_time = session.get("submittedDateTime", "N/A")
-                operation = session.get("operationName", "N/A")
-
-                if job_state == "Failed":
-                    failed_jobs.append({"item_name": item_name, "item_id": item_id, "livy_id": job_id})
-
-                if submitted_time and submitted_time != "N/A":
-                    try:
-                        dt = datetime.fromisoformat(submitted_time.replace("Z", "+00:00"))
-                        submitted_time = dt.strftime("%Y-%m-%d %H:%M")
-                    except Exception:
-                        pass
-
-                duration = session.get("totalDuration")
-                if not duration:
-                    if submitted_time != "N/A":
-                        try:
-                            submitted_dt = datetime.fromisoformat(session.get("submittedDateTime", "").replace("Z", "+00:00"))
-                            end_time = session.get("endDateTime")
-                            if end_time:
-                                end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
-                                duration_seconds = (end_dt - submitted_dt).total_seconds()
-                                duration = f"{int(duration_seconds // 60)}m {int(duration_seconds % 60)}s"
-                            elif job_state in ["InProgress", "NotStarted"]:
-                                now_dt = datetime.now(submitted_dt.tzinfo)
-                                duration_seconds = (now_dt - submitted_dt).total_seconds()
-                                duration = f"{int(duration_seconds // 60)}m {int(duration_seconds % 60)}s"
-                        except Exception:
-                            duration = "N/A"
-                    else:
-                        duration = "N/A"
-
-                status_emoji = {"Succeeded": "✅", "Failed": "❌", "InProgress": "⏳", "NotStarted": "⏸️", "Cancelled": "🚫"}.get(job_state, "")
-                short_job_id = str(job_id)[:8] + "..." if len(str(job_id)) > 12 else job_id
-
-                markdown += f"| `{short_job_id}` | {item_name} | {item_type_val} | {status_emoji} {job_state} | {submitted_time} | {duration} | {operation} |\n"
-
-            markdown += f"\n**Total jobs:** {len(sessions)}\n"
-
-            state_counts = {}
-            for s in sessions:
-                st = s.get("state", "Unknown")
-                state_counts[st] = state_counts.get(st, 0) + 1
-
-            if len(state_counts) > 1:
-                markdown += "\n**By state:** "
-                markdown += ", ".join([f"{k}: {v}" for k, v in sorted(state_counts.items())])
-                markdown += "\n"
-
-            if failed_jobs:
-                markdown += f"\n## Failed Jobs ({len(failed_jobs)})\n\n"
-                markdown += "To get error details, use `get_job_details` with the Livy ID and notebook:\n\n"
-                for fj in failed_jobs[:10]:
-                    markdown += f"- **{fj['item_name']}**\n"
-                    markdown += f"  - Livy ID: `{fj['livy_id']}`\n"
-
-            return markdown
-
-    except Exception as e:
-        logger.error(f"Error listing Spark jobs: {str(e)}")
-        return f"Error listing Spark jobs: {str(e)}"
-
-
-@mcp.tool()
-async def get_job_details(
-    job_id: str,
-    workspace: Optional[str] = None,
-    notebook: Optional[str] = None,
-    ctx: Context = None
-) -> str:
-    """Get detailed information about a specific Spark job execution.
-
-    Retrieves comprehensive details about a Spark job including execution status,
-    timing information, error messages, input parameters, resource configuration,
-    and links to monitoring tools.
-
-    Args:
-        job_id: Livy session ID (from list_spark_jobs)
-        workspace: Workspace name or ID (optional - uses context if not provided)
-        notebook: Notebook name or ID (required to get detailed logs)
-        ctx: Context object containing client information
-
-    Returns:
-        Detailed job information including notebook name, error messages for failed jobs,
-        input parameters, Spark application ID, and monitoring URLs
-    """
-    try:
-        if ctx is None:
-            raise ValueError("Context (ctx) must be provided.")
-
-        if not notebook:
-            return "Error: 'notebook' parameter is required to get job details."
-
-        fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
-        spark_client = SparkClient(fabric_client)
-
-        # Resolve workspace
-        ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
-        if not ws:
-            return "Workspace not set. Please set a workspace using 'set_workspace' command."
-
-        workspace_id = await fabric_client.resolve_workspace(ws)
-
-        # Resolve notebook ID
-        if not _is_valid_uuid(notebook):
-            notebook_id = await fabric_client.resolve_item_id(
-                item=notebook, type="Notebook", workspace=workspace_id
-            )
-        else:
-            notebook_id = notebook
-
-        # Get session details
-        session = await spark_client.get_session_details(workspace_id, notebook_id, job_id)
-
-        if not session:
-            return f"No job found with ID '{job_id}' for notebook '{notebook}' in workspace '{ws}'."
-
-        # Log the raw session for debugging
-        logger.debug(f"Raw session data: {json.dumps(session, indent=2, default=str)}")
-
-        # Enrich session with resolved names (capacity name, workspace name, etc.)
-        try:
-            session = await spark_client.enrich_session_with_names(session)
-        except Exception as e:
-            logger.warning(f"Failed to enrich session with names: {e}")
-
-        # Get notebook metadata to get the display name
-        notebook_client = NotebookClient(fabric_client)
-        notebook_meta = await notebook_client.get_notebook(workspace_id, notebook_id)
-
-        # Resolve notebook name - try multiple sources (API field is 'itemName')
-        notebook_name = session.get('itemName')
-        if not notebook_name and isinstance(notebook_meta, dict):
-            notebook_name = notebook_meta.get("displayName")
-        if not notebook_name:
-            notebook_name = notebook
-
-        # Get item info from session
-        item_info = session.get('item', {})
-        item_id = item_info.get('id', notebook_id)
-        job_instance_id = session.get('jobInstanceId')
-
-        # Status information
-        state = session.get('state', 'Unknown')
-        status_emoji = {
-            "Succeeded": "✅",
-            "Failed": "❌",
-            "InProgress": "⏳",
-            "NotStarted": "⏸️",
-            "Cancelled": "🚫",
-            "Unknown": "❓"
-        }.get(state, "")
-
-        # Format detailed information
-        markdown = f"# Spark Job: {notebook_name}\n\n"
-        markdown += f"**Status:** {status_emoji} {state}\n"
-        markdown += f"**Operation:** {session.get('operationName', 'N/A')}\n"
-        markdown += f"**Workspace:** {ws}\n\n"
-
-        # Timing information - compact format
-        submitted = session.get('submittedDateTime', 'N/A')
-        started = session.get('startDateTime', 'N/A')
-        ended = session.get('endDateTime', 'N/A')
-        total_duration = session.get('totalDuration')
-
-        markdown += f"## Timing\n"
-        markdown += f"| | |\n|---|---|\n"
-        markdown += f"| Submitted | {submitted} |\n"
-        markdown += f"| Started | {started} |\n"
-        markdown += f"| Ended | {ended} |\n"
-
-        # Show duration
-        if total_duration:
-            markdown += f"| **Duration** | **{total_duration}** |\n"
-        elif submitted != 'N/A' and ended != 'N/A':
-            try:
-                submitted_dt = datetime.fromisoformat(submitted.replace("Z", "+00:00"))
-                ended_dt = datetime.fromisoformat(ended.replace("Z", "+00:00"))
-                duration_seconds = (ended_dt - submitted_dt).total_seconds()
-                mins = int(duration_seconds // 60)
-                secs = int(duration_seconds % 60)
-                markdown += f"| **Duration** | **{mins}m {secs}s** |\n"
-            except Exception:
-                pass
-
-        # Submitter information - simplified
-        submitter = session.get('submitter', {})
-        submitter_name = (
-            submitter.get('displayName') or
-            submitter.get('userPrincipalName') or
-            submitter.get('mail') or
-            submitter.get('name')
-        )
-        if submitter_name:
-            markdown += f"\n**Submitted by:** {submitter_name}\n"
-        elif submitter.get('id'):
-            markdown += f"\n**Submitted by:** `{submitter.get('id')}`\n"
-
-        # Cancellation reason if applicable
-        if state == "Cancelled":
-            cancellation_reason = session.get('cancellationReason')
-            if cancellation_reason:
-                markdown += f"\n**Cancellation Reason:** {cancellation_reason}\n"
-
-        # Spark Application link
-        spark_app_id = session.get('sparkApplicationId')
-        if spark_app_id:
-            markdown += f"\n**Spark UI:** [Open Spark Application](https://app.fabric.microsoft.com/groups/{workspace_id}/sparkapplication/{spark_app_id})\n"
-
-        # Error information if failed
-        job_instance = None
-        if state == "Failed":
-            markdown += f"\n## ❌ Error Information\n"
-
-            # Try to get detailed error from job instance API
-            if job_instance_id:
-                job_instance = await spark_client.get_job_instance(workspace_id, notebook_id, job_instance_id)
-                if job_instance:
-                    logger.debug(f"Job instance data: {json.dumps(job_instance, indent=2, default=str)}")
-                    failure_reason = (
-                        job_instance.get('failureReason') or
-                        job_instance.get('errorMessage') or
-                        job_instance.get('error') or
-                        job_instance.get('message')
-                    )
-                    if failure_reason:
-                        markdown += f"**Failure Reason:**\n```\n{failure_reason}\n```\n\n"
-
-                    root_activity_id = job_instance.get('rootActivityId')
-                    if root_activity_id:
-                        markdown += f"**Root Activity ID:** `{root_activity_id}`\n"
-
-            # Include any errors from the session response
-            errors = session.get('errors') or session.get('error') or []
-            if isinstance(errors, dict):
-                errors = [errors]
-            if errors:
-                markdown += f"\n**Error Details:**\n"
-                for error in errors:
-                    if isinstance(error, str):
-                        markdown += f"```\n{error}\n```\n"
-                    else:
-                        error_code = error.get('errorCode') or error.get('code') or 'Unknown'
-                        error_message = error.get('message') or error.get('errorMessage') or 'No message'
-                        error_source = error.get('source') or ''
-                        markdown += f"- **{error_code}**"
-                        if error_source:
-                            markdown += f" (Source: {error_source})"
-                        markdown += f"\n  ```\n  {error_message}\n  ```\n"
-
-            # If no specific errors found
-            has_failure_info = bool(errors) or (job_instance and (job_instance.get('failureReason') or job_instance.get('errorMessage')))
-            if not has_failure_info:
-                markdown += "\n⚠️ *No detailed error information available from the API.*\n"
-                markdown += "*Check the Spark logs in the Fabric portal for more details.*\n"
-
-        # Links section
-        markdown += f"\n## Links\n"
-        markdown += f"- [Open Notebook](https://app.fabric.microsoft.com/groups/{workspace_id}/notebooks/{notebook_id})\n"
-        if job_instance_id:
-            markdown += f"- [View in Monitoring Hub](https://app.fabric.microsoft.com/groups/{workspace_id}/monitoringhub?experience=fabric-developer&jobId={job_instance_id})\n"
-
-        return markdown
-
-    except Exception as e:
-        logger.error(f"Error getting job details: {str(e)}")
-        return f"Error getting job details: {str(e)}"
-
-
-# ===== AGENTIC / ORCHESTRATED TOOLS =====
-# These tools use the orchestration layer for intelligent multi-step workflows
-
-@mcp.tool()
-async def create_notebook_validated(
-    workspace: str,
-    notebook_name: str,
-    template_type: str = "basic",
-    validate: bool = True,
-    optimize: bool = False,
-    ctx: Context = None
-) -> str:
-    """Create a PySpark notebook with automatic validation and optimization (AGENTIC).
-    
-    This is an intelligent orchestrated operation that:
-    1. Creates notebook from template
-    2. Validates code (if validate=True)
-    3. Analyzes performance (if optimize=True)
-    4. Returns results with intelligent next-step suggestions
-    
-    Args:
-        workspace: Fabric workspace name
-        notebook_name: Name for the new notebook
-        template_type: Template type (basic/etl/analytics/ml/fabric_integration/streaming)
-        validate: Run validation after creation (default: True)
-        optimize: Run performance analysis (default: False)
-        ctx: Context object
-    
-    Returns:
-        JSON string with creation results, validation, and intelligent suggestions
-    """
-    try:
-        if ctx is None:
-            raise ValueError("Context (ctx) must be provided.")
-        
-        from helpers.orchestration.notebook_orchestrator import notebook_orchestrator
-        
-        result = await notebook_orchestrator.create_validated_notebook(
-            workspace=workspace,
-            notebook_name=notebook_name,
-            template_type=template_type,
-            validate=validate,
-            optimize=optimize,
-            ctx=ctx
-        )
-        
-        return json.dumps(result, indent=2)
-    
-    except Exception as e:
-        logger.error(f"Error in create_notebook_validated: {str(e)}")
-        return json.dumps({
-            "error": str(e),
-            "success": False
-        }, indent=2)
-
-
-@mcp.tool()
-async def execute_notebook_intent(
-    goal: str,
-    workspace: Optional[str] = None,
-    notebook_id: Optional[str] = None,
-    execution_mode: str = "standard",
-    ctx: Context = None
-) -> str:
-    """Execute notebook operations based on natural language intent (AGENTIC).
-    
-    Intelligent routing based on keywords in the goal:
-    - Create/build → create_pyspark_notebook workflow
-    - Validate/check → validate_pyspark_code workflow
-    - Optimize/improve → analyze_notebook_performance + optimization workflow
-    - Explore/analyze → comprehensive notebook analysis
-    
-    Execution modes:
-    - fast: Quick preview, minimal validation (5x faster)
-    - standard: Normal execution with validation (default)
-    - analyze: Full analysis with performance metrics (detailed insights)
-    - safe: Maximum validation with rollback capability (production-safe)
-    
-    Args:
-        goal: Natural language description of what you want to achieve
-        workspace: Fabric workspace name (optional, uses context if not provided)
-        notebook_id: Notebook ID (for existing notebooks, optional)
-        execution_mode: Execution mode (fast/standard/analyze/safe, default: standard)
-        ctx: Context object
-    
-    Returns:
-        JSON string with execution results and intelligent suggestions
-    
-    Examples:
-        - "Create a new ETL notebook and validate it"
-        - "Optimize my slow notebook"
-        - "Analyze the performance of my notebook"
-        - "Validate the notebook code for errors"
-    """
-    try:
-        if ctx is None:
-            raise ValueError("Context (ctx) must be provided.")
-        
-        from helpers.orchestration.agent_policy import agent_policy
-        from helpers.utils.context import get_context
-        
-        # Get context
-        ctx_obj = get_context()
-        context = {
-            'workspace': workspace or ctx_obj.workspace,
-            'notebook_id': notebook_id,
-        }
-        
-        # Execute intent
-        result = await agent_policy.execute_intent(
-            intent=goal,
-            domain='notebook',
-            context=context,
-            execution_mode=execution_mode,
-            ctx=ctx
-        )
-        
-        return json.dumps(result, indent=2)
-    
-    except Exception as e:
-        logger.error(f"Error in execute_notebook_intent: {str(e)}")
-        return json.dumps({
-            "error": str(e),
-            "success": False,
-            "suggestion": "Try rephrasing your goal or provide more specific details"
-        }, indent=2)
-
-
-@mcp.tool()
-async def get_notebook_suggestions(
-    notebook_id: str,
-    workspace: str,
-    ctx: Context = None
-) -> str:
-    """Get intelligent next-step suggestions for a notebook (AGENTIC).
-    
-    Analyzes the notebook and provides context-aware suggestions for:
-    - Code improvements
-    - Performance optimizations
-    - Best practices
-    - Next logical steps
-    
-    Args:
-        notebook_id: Notebook ID
-        workspace: Workspace name
-        ctx: Context object
-    
-    Returns:
-        JSON string with intelligent suggestions
-    """
-    try:
-        if ctx is None:
-            raise ValueError("Context (ctx) must be provided.")
-        
-        from helpers.orchestration.notebook_orchestrator import notebook_orchestrator
-        
-        result = await notebook_orchestrator.analyze_notebook_comprehensive(
-            notebook_id=notebook_id,
-            workspace=workspace,
-            ctx=ctx
-        )
-        
-        # Extract just the suggestions
-        return json.dumps({
-            "notebook_id": notebook_id,
-            "suggestions": result.get('suggested_next_actions', []),
-            "summary": result.get('summary', {}),
-            "workflow": "get_notebook_suggestions"
-        }, indent=2)
-    
-    except Exception as e:
-        logger.error(f"Error in get_notebook_suggestions: {str(e)}")
-        return json.dumps({
-            "error": str(e),
-            "success": False
-        }, indent=2)
-
-
-@mcp.tool()
-async def list_available_workflows(ctx: Context = None) -> str:
-    """List all available pre-defined workflows (AGENTIC).
-    
-    Returns information about intelligent workflow chains that can automate
-    multi-step operations like:
-    - Complete notebook development
-    - Lakehouse data exploration
-    - ETL pipeline setup
-    - ML notebook setup
-    - Performance optimization pipelines
-    
-    Returns:
-        JSON string with available workflows and their descriptions
-    """
-    try:
-        from helpers.orchestration.agent_policy import agent_policy
-        
-        workflows = agent_policy.get_available_workflows()
-        
-        return json.dumps(workflows, indent=2)
-    
-    except Exception as e:
-        logger.error(f"Error in list_available_workflows: {str(e)}")
-        return json.dumps({
-            "error": str(e),
-            "success": False
-        }, indent=2)
-
-

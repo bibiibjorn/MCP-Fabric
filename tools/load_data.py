@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 
 
 @mcp.tool()
-async def load_data_from_url(
+async def load_data(
     url: str,
     destination_table: str,
     workspace: Optional[str] = None,
@@ -66,7 +66,7 @@ async def load_data_from_url(
             return "Either lakehouse or warehouse must be specified."
         # TODO: Implement actual data loading via client API
         os.remove(tmp_path)
-        return f"Error: load_data_from_url is not yet implemented. The file was downloaded from {url} ({file_ext}) but data loading into {resource_type} '{resource_id}' is not supported yet. Use 'run_query' or PySpark notebooks to load data instead."
+        return f"Error: load_data is not yet implemented. The file was downloaded from {url} ({file_ext}) but data loading into {resource_type} '{resource_id}' is not supported yet. Use 'run_query' or PySpark notebooks to load data instead."
     except Exception as e:
         return f"Error loading data: {str(e)}"
 

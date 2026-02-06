@@ -214,7 +214,7 @@ class FabricApiClient:
                             response = await self._execute_with_retry(
                                 "POST", url, json=params
                             )
-                            if response.status_code == 200:
+                            if response.status_code == 200 and response.content:
                                 return response.json()
                         logger.error("LRO: No Operation-Location or Location header found.")
                         logger.debug(f"LRO: Response headers: {dict(response.headers)}")
@@ -269,6 +269,15 @@ class FabricApiClient:
                         )
                         await asyncio.sleep(lro_poll_interval)
                 response.raise_for_status()
+                # Handle empty response bodies (202 Accepted, 204 No Content, etc.)
+                if not response.content:
+                    if response.status_code == 202:
+                        result = {"_status_code": 202}
+                        location = response.headers.get("Location") or response.headers.get("location")
+                        if location:
+                            result["_location"] = location
+                        return result
+                    return None
                 return response.json()
             except httpx.HTTPError as e:
                 logger.error(f"API call failed: {str(e)}")

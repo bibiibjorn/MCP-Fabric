@@ -188,7 +188,10 @@ class PowerBIClient:
             response = await self._execute_with_retry("POST", url, json=payload)
 
             if response.status_code == 400:
-                error_data = response.json()
+                try:
+                    error_data = response.json()
+                except Exception:
+                    raise ValueError(f"DAX query error: HTTP 400 (empty response body)")
                 error_message = error_data.get("error", {}).get("message", "Unknown error")
                 # Check for specific DAX errors
                 if "error" in error_data:

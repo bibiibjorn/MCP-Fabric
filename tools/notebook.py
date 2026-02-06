@@ -164,32 +164,37 @@ async def manage_notebook(
             # Extract and decode the notebook content from the definition
             parts = definition.get("definition", {}).get("parts", [])
 
+            decoded_content = None
+            notebook_format = None
+
             # Priority order: .ipynb first, then notebook-content.py (Fabric native format)
             for part in parts:
                 path = part.get("path", "")
                 if path.endswith(".ipynb"):
                     payload = part.get("payload", "")
                     if payload:
-                        # Decode base64 content
                         decoded_content = base64.b64decode(payload).decode("utf-8")
-                        return decoded_content
+                        notebook_format = "ipynb"
+                        break
 
-            # Fallback to Fabric's native .py format (notebook-content.py)
-            for part in parts:
-                path = part.get("path", "")
-                if path == "notebook-content.py" or path.endswith(".py"):
-                    payload = part.get("payload", "")
-                    if payload:
-                        # Decode base64 content
-                        decoded_content = base64.b64decode(payload).decode("utf-8")
-                        return decoded_content
+            if decoded_content is None:
+                for part in parts:
+                    path = part.get("path", "")
+                    if path == "notebook-content.py" or path.endswith(".py"):
+                        payload = part.get("payload", "")
+                        if payload:
+                            decoded_content = base64.b64decode(payload).decode("utf-8")
+                            notebook_format = "py"
+                            break
 
-            # If no content found, list available parts for debugging
-            if parts:
-                part_paths = [p.get("path", "unknown") for p in parts]
-                return f"No notebook content found. Available parts: {part_paths}"
+            if decoded_content is None:
+                if parts:
+                    part_paths = [p.get("path", "unknown") for p in parts]
+                    return f"No notebook content found. Available parts: {part_paths}"
+                return "No notebook content found in the definition."
 
-            return "No notebook content found in the definition."
+            # Format the notebook content as readable markdown instead of raw JSON
+            return _format_notebook_content(decoded_content, notebook_format, notebook_id)
 
         except Exception as e:
             logger.error(f"Error getting notebook content: {str(e)}")
@@ -521,20 +526,47 @@ async def manage_notebook(
             if not workspace:
                 return "Error: 'workspace' is required for 'analyze_performance' action."
 
-            # Get notebook content via the get_content action
-            notebook_content = await manage_notebook(
-                action="get_content",
-                workspace=workspace,
-                notebook_id=notebook_id,
-                ctx=ctx,
-            )
+            fabric_client = FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
+            notebook_client = NotebookClient(fabric_client)
 
-            if notebook_content.startswith("Error"):
-                return notebook_content
+            workspace_id = await fabric_client.resolve_workspace(workspace)
 
-            # Parse notebook and extract code cells
-            notebook_data = json.loads(notebook_content)
-            cells = notebook_data.get("cells", [])
+            if not _is_valid_uuid(notebook_id):
+                notebook_resolved_id = await fabric_client.resolve_item_id(
+                    item=notebook_id, type="Notebook", workspace=workspace_id
+                )
+            else:
+                notebook_resolved_id = notebook_id
+
+            definition = await notebook_client.get_notebook_definition(workspace_id, notebook_resolved_id)
+
+            if isinstance(definition, str):
+                return definition
+            if definition is None:
+                return "Error: Failed to get notebook definition."
+
+            # Extract and decode raw notebook content for analysis
+            parts = definition.get("definition", {}).get("parts", [])
+            cells = []
+            for part in parts:
+                path = part.get("path", "")
+                if path.endswith(".ipynb"):
+                    payload = part.get("payload", "")
+                    if payload:
+                        decoded = base64.b64decode(payload).decode("utf-8")
+                        notebook_data = json.loads(decoded)
+                        cells = notebook_data.get("cells", [])
+                        break
+            if not cells:
+                # Try Fabric .py format
+                for part in parts:
+                    path = part.get("path", "")
+                    if path == "notebook-content.py" or path.endswith(".py"):
+                        payload = part.get("payload", "")
+                        if payload:
+                            decoded = base64.b64decode(payload).decode("utf-8")
+                            cells = _parse_fabric_py_to_cells(decoded)
+                            break
 
             code_cells = [cell for cell in cells if cell.get("cell_type") == "code"]
 
@@ -1097,6 +1129,91 @@ async def manage_spark_jobs(
 
 
 # ===== HELPER FUNCTIONS =====
+
+
+def _format_notebook_content(decoded_content: str, notebook_format: str, notebook_id: str) -> str:
+    """Format notebook content as readable markdown instead of raw JSON/py.
+
+    Parses the notebook and returns a clean cell-by-cell view with code blocks,
+    keeping responses concise and readable in chat UIs.
+    """
+    if notebook_format == "ipynb":
+        try:
+            nb = json.loads(decoded_content)
+        except json.JSONDecodeError:
+            return decoded_content  # Fallback to raw if unparseable
+
+        cells = nb.get("cells", [])
+        if not cells:
+            return "Notebook has no cells."
+
+        kernel = nb.get("metadata", {}).get("language_info", {}).get("name", "python")
+        code_count = sum(1 for c in cells if c.get("cell_type") == "code")
+        md_count = sum(1 for c in cells if c.get("cell_type") == "markdown")
+
+        lines = [
+            f"# Notebook: {notebook_id}",
+            f"**Cells:** {len(cells)} ({code_count} code, {md_count} markdown) | **Kernel:** {kernel}",
+            "",
+        ]
+
+        for idx, cell in enumerate(cells):
+            cell_type = cell.get("cell_type", "code")
+            source = cell.get("source", [])
+            if isinstance(source, list):
+                source_str = "".join(source)
+            else:
+                source_str = source
+
+            source_str = source_str.rstrip()
+            if not source_str:
+                continue
+
+            if cell_type == "markdown":
+                lines.append(f"---\n**Cell {idx} (markdown):**\n{source_str}\n")
+            else:
+                lang = kernel if kernel != "python" else "python"
+                lines.append(f"---\n**Cell {idx} (code):**\n```{lang}\n{source_str}\n```\n")
+
+        return "\n".join(lines)
+
+    elif notebook_format == "py":
+        # Fabric native .py format — parse into cells first, then format
+        cells = _parse_fabric_py_to_cells(decoded_content)
+        if not cells:
+            return decoded_content
+
+        code_count = sum(1 for c in cells if c.get("cell_type") == "code")
+        md_count = sum(1 for c in cells if c.get("cell_type") == "markdown")
+
+        lines = [
+            f"# Notebook: {notebook_id}",
+            f"**Cells:** {len(cells)} ({code_count} code, {md_count} markdown) | **Format:** Fabric .py",
+            "",
+        ]
+
+        for idx, cell in enumerate(cells):
+            cell_type = cell.get("cell_type", "code")
+            source = cell.get("source", [])
+            if isinstance(source, list):
+                source_str = "".join(source)
+            else:
+                source_str = source
+
+            source_str = source_str.rstrip()
+            if not source_str:
+                continue
+
+            if cell_type == "markdown":
+                lines.append(f"---\n**Cell {idx} (markdown):**\n{source_str}\n")
+            else:
+                lines.append(f"---\n**Cell {idx} (code):**\n```python\n{source_str}\n```\n")
+
+        return "\n".join(lines)
+
+    # Unknown format — return raw
+    return decoded_content
+
 
 def _get_pyspark_template(template_type: str) -> Optional[dict]:
     """Get a PySpark notebook template by type.

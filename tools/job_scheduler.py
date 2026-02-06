@@ -118,10 +118,15 @@ async def manage_item_job(
             )
 
             # The API returns 202 with Location header containing the job instance URL
-            # _make_request may return None for 202 without LRO polling
             if response and isinstance(response, dict):
-                instance_id = response.get("id", "N/A")
-                status = response.get("status", "Accepted")
+                if response.get("_status_code") == 202:
+                    # Extract job instance ID from Location header URL
+                    location = response.get("_location", "")
+                    instance_id = location.rstrip("/").split("/")[-1] if location else "Submitted"
+                    status = "Accepted"
+                else:
+                    instance_id = response.get("id", "N/A")
+                    status = response.get("status", "Accepted")
             else:
                 instance_id = "Submitted"
                 status = "Accepted"

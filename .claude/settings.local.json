@@ -23,7 +23,8 @@
       "Bash(\"C:\\\\Tools\\\\TEST MCP FInvision FABRIC\\\\MCP-Fabric\\\\.venv\\\\Scripts\\\\python.exe\":*)",
       "Bash(\"C:\\\\Tools\\\\TEST MCP FInvision FABRIC\\\\MCP-Fabric\\\\.venv\\\\Scripts\\\\python.exe\" -c \"from tools import *; print\\(''tools OK''\\)\")",
       "Bash(\"C:\\\\Tools\\\\TEST MCP FInvision FABRIC\\\\MCP-Fabric\\\\.venv\\\\Scripts\\\\python.exe\" -c \"from fabric_mcp import mcp; print\\(''Server import OK''\\); print\\(''Name:'', mcp.name\\)\")",
-      "Bash(timeout 10:*)"
+      "Bash(timeout 10:*)",
+      "Bash(xargs ls:*)"
     ]
   }
 }

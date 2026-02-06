@@ -71,7 +71,7 @@ class NotebookOrchestrator:
             # Parse result
             try:
                 creation_data = json.loads(creation_result) if isinstance(creation_result, str) else creation_result
-            except:
+            except (json.JSONDecodeError, TypeError, ValueError):
                 creation_data = {'raw_response': creation_result}
 
             results['notebook_created'] = creation_data

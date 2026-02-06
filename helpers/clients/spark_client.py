@@ -3,15 +3,17 @@ Spark Client for managing Spark job executions (Livy sessions) in Microsoft Fabr
 """
 
 from typing import Optional, Dict, Any, List
+from functools import lru_cache
 from helpers.clients.fabric_client import FabricApiClient
 from helpers.logging_config import get_logger
+from cachetools import TTLCache
 
 logger = get_logger(__name__)
 
-# Cache for ID-to-name lookups (shared across instances)
-_capacity_cache: Dict[str, str] = {}
-_workspace_cache: Dict[str, str] = {}
-_user_cache: Dict[str, Dict[str, str]] = {}  # user_id -> {displayName, userPrincipalName}
+# Cache for ID-to-name lookups (shared across instances, bounded with TTL)
+_capacity_cache: TTLCache = TTLCache(maxsize=256, ttl=3600)
+_workspace_cache: TTLCache = TTLCache(maxsize=256, ttl=3600)
+_user_cache: TTLCache = TTLCache(maxsize=512, ttl=3600)
 
 
 class SparkClient:

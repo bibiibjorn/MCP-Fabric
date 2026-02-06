@@ -297,7 +297,7 @@ class LakehouseOrchestrator:
                 lakehouse=lakehouse,
                 ctx=ctx
             )
-            tables_data = json.loads(tables_result) if isinstance(tables_result, str) else tables_data
+            tables_data = json.loads(tables_result) if isinstance(tables_result, str) else tables_result
 
             tables_list = tables_data.get('tables', [])
             results['table_count'] = len(tables_list)

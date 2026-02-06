@@ -40,9 +40,11 @@ async def list_warehouses(workspace: Optional[str] = None, ctx: Context = None) 
             FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
         )
 
-        warehouses = await client.list_warehouses(
-            workspace if workspace else __ctx_cache[f"{ctx.client_id}_workspace"]
-        )
+        ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
+        if not ws:
+            return "Workspace not set. Please set a workspace using 'set_workspace' command."
+
+        warehouses = await client.list_warehouses(ws)
 
         return warehouses
 
@@ -72,15 +74,17 @@ async def create_warehouse(
             FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
         )
 
+        ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
+        if not ws:
+            return "Workspace not set. Please set a workspace using 'set_workspace' command."
+
         response = await client.create_warehouse(
             name=name,
-            workspace=workspace
-            if workspace
-            else __ctx_cache[f"{ctx.client_id}_workspace"],
+            workspace=ws,
             description=description,
         )
 
-        return f"Warehouse '{response['id']}' created successfully."
+        return f"Warehouse '{response.get('id', 'unknown')}' created successfully."
 
     except Exception as e:
         return f"Error creating warehouse: {str(e)}"

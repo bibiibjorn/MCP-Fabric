@@ -4,7 +4,6 @@ import base64
 from urllib.parse import quote
 from functools import lru_cache
 import requests
-from azure.identity import DefaultAzureCredential
 from helpers.logging_config import get_logger
 from helpers.utils import _is_valid_uuid
 import json
@@ -29,8 +28,10 @@ class FabricApiConfig(BaseModel):
 class FabricApiClient:
     """Client for communicating with the Fabric API"""
 
-    def __init__(self, credential=None, config=None):
-        self.credential = credential or DefaultAzureCredential()
+    def __init__(self, credential, config=None):
+        if credential is None:
+            raise ValueError("credential is required. Use get_shared_credential() or get_azure_credentials() to obtain one.")
+        self.credential = credential
         self.config = config or FabricApiConfig()
         # Initialize cached methods
         self._cached_resolve_workspace = lru_cache(maxsize=128)(self._resolve_workspace)

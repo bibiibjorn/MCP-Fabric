@@ -64,11 +64,9 @@ async def load_data_from_url(
             resource_type = "warehouse"
         else:
             return "Either lakehouse or warehouse must be specified."
-        # Here you would call the appropriate method to upload/ingest the file into the table.
-        # This is a placeholder for the actual implementation, which depends on the client API.
-        # For now, just return a success message with file info.
+        # TODO: Implement actual data loading via client API
         os.remove(tmp_path)
-        return f"Data from {url} loaded into table '{destination_table}' in {resource_type} '{resource_id}'. (File type: {file_ext})"
+        return f"Error: load_data_from_url is not yet implemented. The file was downloaded from {url} ({file_ext}) but data loading into {resource_type} '{resource_id}' is not supported yet. Use 'run_query' or PySpark notebooks to load data instead."
     except Exception as e:
         return f"Error loading data: {str(e)}"
 

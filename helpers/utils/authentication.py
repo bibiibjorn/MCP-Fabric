@@ -9,8 +9,12 @@ import json
 import os
 import sys
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
+
+# Thread lock for credential singleton
+_credential_lock = threading.Lock()
 
 # How often to require re-authentication (in hours)
 REAUTH_INTERVAL_HOURS = 24
@@ -54,8 +58,8 @@ def _load_auth_record():
         if os.path.exists(AUTH_RECORD_PATH):
             with open(AUTH_RECORD_PATH, "r") as f:
                 return AuthenticationRecord.deserialize(f.read())
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Could not load auth record from {AUTH_RECORD_PATH}: {e}")
     return None
 
 
@@ -139,57 +143,61 @@ def get_shared_credential():
     if _shared_credential is not None:
         return _shared_credential
 
-    # Check if daily re-authentication is required
-    login_expired = _is_login_expired()
+    with _credential_lock:
+        # Double-check after acquiring lock
+        if _shared_credential is not None:
+            return _shared_credential
 
-    # Try to load existing authentication record
-    auth_record = _load_auth_record()
+        # Check if daily re-authentication is required
+        login_expired = _is_login_expired()
 
-    if auth_record is None or login_expired:
-        # No cached credentials OR daily login required - perform interactive auth
-        if login_expired and auth_record is not None:
-            logger.info("Daily re-authentication required.")
-        else:
-            logger.info("No cached credentials found.")
-        _shared_credential, _shared_auth_record = _perform_interactive_auth()
-        return _shared_credential
+        # Try to load existing authentication record
+        auth_record = _load_auth_record()
 
-    # Have cached credentials that are still within daily window - try to use them
-    logger.info(f"Found cached credentials for: {auth_record.username}")
+        if auth_record is None or login_expired:
+            # No cached credentials OR daily login required - perform interactive auth
+            if login_expired and auth_record is not None:
+                logger.info("Daily re-authentication required.")
+            else:
+                logger.info("No cached credentials found.")
+            _shared_credential, _shared_auth_record = _perform_interactive_auth()
+            return _shared_credential
 
-    cred = InteractiveBrowserCredential(
-        cache_persistence_options=_cache_options,
-        authentication_record=auth_record,
-    )
+        # Have cached credentials that are still within daily window - try to use them
+        logger.info(f"Found cached credentials for: {auth_record.username}")
 
-    # Verify credentials still work by getting a token
-    try:
-        cred.get_token(FABRIC_SCOPE)
-        logger.info("Cached credentials verified successfully.")
-        _shared_credential = cred
-        _shared_auth_record = auth_record
-        return _shared_credential
-    except Exception as e:
-        # Credentials expired or invalid - re-authenticate
-        logger.warning(f"Cached credentials expired or invalid: {e}")
-        logger.info("Re-authenticating...")
+        cred = InteractiveBrowserCredential(
+            cache_persistence_options=_cache_options,
+            authentication_record=auth_record,
+        )
 
-        # Remove old record
+        # Verify credentials still work by getting a token
         try:
-            os.remove(AUTH_RECORD_PATH)
-        except Exception:
-            pass
+            cred.get_token(FABRIC_SCOPE)
+            logger.info("Cached credentials verified successfully.")
+            _shared_credential = cred
+            _shared_auth_record = auth_record
+            return _shared_credential
+        except Exception as e:
+            # Credentials expired or invalid - re-authenticate
+            logger.warning(f"Cached credentials expired or invalid: {e}")
+            logger.info("Re-authenticating...")
 
-        _shared_credential, _shared_auth_record = _perform_interactive_auth()
-        return _shared_credential
+            # Remove old record
+            try:
+                os.remove(AUTH_RECORD_PATH)
+            except Exception:
+                pass
+
+            _shared_credential, _shared_auth_record = _perform_interactive_auth()
+            return _shared_credential
 
 
 def get_azure_credentials(client_id: str, cache: TTLCache):
     """
     Get Azure credentials using cached authentication.
 
-    DEPRECATED: Use get_shared_credential() instead for unified auth.
-
+    Wraps get_shared_credential() with per-client TTL caching.
     Uses persistent token caching so authentication only needs to happen once.
     Tokens are automatically refreshed using the cached refresh token.
     """

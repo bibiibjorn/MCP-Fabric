@@ -1,7 +1,7 @@
 from typing import Optional
 from helpers.utils.context import mcp, __ctx_cache
 from mcp.server.fastmcp import Context
-from helpers.clients import get_sql_endpoint
+from helpers.clients import get_sql_endpoint as _resolve_sql_endpoint
 
 
 @mcp.tool()
@@ -41,10 +41,10 @@ async def get_sql_endpoint(
                     "Either lakehouse or warehouse must be specified or set in context."
                 )
 
-        name, endpoint = await get_sql_endpoint(
+        name, endpoint = await _resolve_sql_endpoint(
             workspace=workspace,
             lakehouse=lakehouse,
-            warehouse=warehouse,  # Add warehouse to the call
+            warehouse=warehouse,
             type=type,
         )
 

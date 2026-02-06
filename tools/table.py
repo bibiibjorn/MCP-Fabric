@@ -10,8 +10,20 @@ from helpers.clients import (
 
 from typing import Optional
 from helpers.logging_config import get_logger
+import re
 
 logger = get_logger(__name__)
+
+
+def _validate_sql_identifier(value: str) -> str:
+    """Validate a SQL identifier (schema name, table name, view name).
+
+    Only allows alphanumeric characters, underscores, spaces, hyphens, and dots.
+    Raises ValueError if the identifier contains unsafe characters.
+    """
+    if not re.match(r'^[\w\s\-\.]+$', value):
+        raise ValueError(f"Invalid SQL identifier: '{value}'.")
+    return value
 
 
 @mcp.tool()
@@ -50,13 +62,16 @@ async def list_tables(
             FabricApiClient(get_azure_credentials(ctx.client_id, __ctx_cache))
         )
 
+        ws = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
+        lh = lakehouse or __ctx_cache.get(f"{ctx.client_id}_lakehouse")
+        if not ws:
+            return "Workspace not set. Please set a workspace using 'set_workspace' command."
+        if not lh:
+            return "Lakehouse not set. Please set a lakehouse using 'set_lakehouse' command."
+
         tables = await client.list_tables(
-            workspace_id=workspace
-            if workspace
-            else __ctx_cache[f"{ctx.client_id}_workspace"],
-            rsc_id=lakehouse
-            if lakehouse
-            else __ctx_cache[f"{ctx.client_id}_lakehouse"],
+            workspace_id=ws,
+            rsc_id=lh,
         )
 
         return tables
@@ -204,7 +219,7 @@ async def run_query(
         # markdown += f"\n\n### Data Preview:\n\n"
         # markdown += df.head(10).to_pandas().to_markdown(index=False)
         # markdown += f"\n\nColumns: {', '.join(df.columns)}"
-        return df.to_dict()  # Return the DataFrame as a dictionary for easier handling
+        return df.head(10).to_pandas().to_markdown(index=False)
     except Exception as e:
         logger.error(f"Error reading data: {str(e)}")
         return f"Error reading data: {str(e)}"
@@ -258,7 +273,11 @@ async def list_views(
         client = SQLClient(sql_endpoint=sql_endpoint, database=database)
 
         # Query INFORMATION_SCHEMA.VIEWS to get all views
-        schema_filter = f"WHERE TABLE_SCHEMA = '{schema_name}'" if schema_name else ""
+        if schema_name:
+            _validate_sql_identifier(schema_name)
+            schema_filter = f"WHERE TABLE_SCHEMA = '{schema_name}'"
+        else:
+            schema_filter = ""
         query = f"""
             SELECT
                 TABLE_SCHEMA as schema_name,
@@ -274,7 +293,7 @@ async def list_views(
         if df.is_empty():
             return f"No views found in {database}."
 
-        return df.to_dict()
+        return df.to_pandas().to_markdown(index=False)
 
     except Exception as e:
         logger.error(f"Error listing views: {str(e)}")
@@ -324,6 +343,9 @@ async def get_view_schema(
         ):
             return f"Failed to resolve SQL endpoint: {sql_endpoint}"
 
+        _validate_sql_identifier(schema_name)
+        _validate_sql_identifier(view_name)
+
         logger.info(f"Getting schema for view {schema_name}.{view_name}")
         client = SQLClient(sql_endpoint=sql_endpoint, database=database)
 
@@ -357,11 +379,12 @@ async def get_view_schema(
         if columns_df.is_empty():
             return f"View '{schema_name}.{view_name}' not found."
 
-        result = {
-            "view_name": f"{schema_name}.{view_name}",
-            "columns": columns_df.to_dict(),
-            "definition": definition_df.to_dict() if not definition_df.is_empty() else None,
-        }
+        result = f"## View: {schema_name}.{view_name}\n\n"
+        result += "### Columns\n\n"
+        result += columns_df.to_pandas().to_markdown(index=False)
+        if not definition_df.is_empty():
+            definition = definition_df.to_pandas().iloc[0, 0]
+            result += f"\n\n### Definition\n\n```sql\n{definition}\n```"
 
         return result
 

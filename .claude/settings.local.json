@@ -18,7 +18,12 @@
       "Bash(.venvScriptspython -c \"\nimport asyncio\nfrom helpers.utils.authentication import get_azure_credentials\nfrom helpers.clients.fabric_client import FabricApiClient\n\nasync def get_ids\\(\\):\n    cred = get_azure_credentials\\(''test'', {}\\)\n    client = FabricApiClient\\(cred\\)\n    \n    # Get workspaces\n    workspaces = await client.get_workspaces\\(\\)\n    print\\(''=== WORKSPACES ===''\\)\n    for ws in workspaces[:5]:\n        print\\(f\"\"{ws.get\\(''id''\\)} - {ws.get\\(''displayName''\\)}\"\"\\)\n    \n    if workspaces:\n        ws_id = workspaces[0][''id'']\n        print\\(f''\\\\nUsing workspace: {ws_id}''\\)\n        \n        # Get semantic models\n        models = await client.get_semantic_models\\(ws_id\\)\n        print\\(''\\\\n=== SEMANTIC MODELS ===''\\)\n        for m in models[:5]:\n            print\\(f\"\"{m.get\\(''id''\\)} - {m.get\\(''displayName''\\)}\"\"\\)\n\nasyncio.run\\(get_ids\\(\\)\\)\n\")",
       "Bash(.venv\\\\Scripts\\\\python.exe:*)",
       "Bash(.venvScriptspython.exe query_failed_job.py)",
-      "Bash(.venvScriptspython.exe -c \"from tools import semantic_model; funcs = [t for t in dir\\(semantic_model\\) if t.startswith\\(''get_''\\) or t.startswith\\(''list_''\\) or t.startswith\\(''evaluate_''\\) or t.startswith\\(''execute_''\\) or t.startswith\\(''read_''\\) or t.startswith\\(''set_''\\)]; print\\(''Tools found:''\\); [print\\(f''  - {f}''\\) for f in funcs]\")"
+      "Bash(.venvScriptspython.exe -c \"from tools import semantic_model; funcs = [t for t in dir\\(semantic_model\\) if t.startswith\\(''get_''\\) or t.startswith\\(''list_''\\) or t.startswith\\(''evaluate_''\\) or t.startswith\\(''execute_''\\) or t.startswith\\(''read_''\\) or t.startswith\\(''set_''\\)]; print\\(''Tools found:''\\); [print\\(f''  - {f}''\\) for f in funcs]\")",
+      "Bash(test:*)",
+      "Bash(\"C:\\\\Tools\\\\TEST MCP FInvision FABRIC\\\\MCP-Fabric\\\\.venv\\\\Scripts\\\\python.exe\":*)",
+      "Bash(\"C:\\\\Tools\\\\TEST MCP FInvision FABRIC\\\\MCP-Fabric\\\\.venv\\\\Scripts\\\\python.exe\" -c \"from tools import *; print\\(''tools OK''\\)\")",
+      "Bash(\"C:\\\\Tools\\\\TEST MCP FInvision FABRIC\\\\MCP-Fabric\\\\.venv\\\\Scripts\\\\python.exe\" -c \"from fabric_mcp import mcp; print\\(''Server import OK''\\); print\\(''Name:'', mcp.name\\)\")",
+      "Bash(timeout 10:*)"
     ]
   }
 }

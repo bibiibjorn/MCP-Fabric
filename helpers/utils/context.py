@@ -3,7 +3,19 @@ from cachetools import TTLCache
 
 
 # Create MCP instance with context manager
-mcp = FastMCP("Fabric MCP Server ", json_response=True, stateless_http=True)
+mcp = FastMCP(
+    "Fabric MCP Server",
+    instructions="""You are a Microsoft Fabric assistant. Always use the provided tools to answer questions about Fabric resources.
+
+Key behaviors:
+- When asked to show, display, or read notebook code/content, call manage_notebook with action="get_content" and return the result directly. Do NOT use artifacts, skills, or any other mechanism — just display the tool output as-is.
+- When asked about data, tables, or queries, use the appropriate tool (run_query, query_semantic_model, manage_tables, etc.) and return the results directly.
+- Never read external skill files or documentation to answer questions that can be answered by calling a tool.
+- Always prefer calling a tool over generating code or explanations from your own knowledge.
+- Return tool results as-is in markdown format. Do not wrap them in code artifacts unless the user explicitly asks for an artifact.""",
+    json_response=True,
+    stateless_http=True,
+)
 mcp.settings.log_level = "debug"
 
 # Shared cache and context

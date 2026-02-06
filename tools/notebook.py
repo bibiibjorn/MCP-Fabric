@@ -796,10 +796,9 @@ async def manage_spark_jobs(
 
                     duration = session.get("totalDuration", "N/A")
                     status_emoji = {"Succeeded": "✅", "Failed": "❌", "InProgress": "⏳", "NotStarted": "⏸️", "Cancelled": "🚫"}.get(job_state, "")
-                    short_job_id = str(livy_id)[:8] + "..." if len(str(livy_id)) > 12 else livy_id
                     short_ws = ws_name[:15] + "..." if len(ws_name) > 18 else ws_name
 
-                    markdown += f"| {short_ws} | {item_name} | {item_type_val} | {status_emoji} {job_state} | {submitted_time} | {duration} | `{short_job_id}` |\n"
+                    markdown += f"| {short_ws} | {item_name} | {item_type_val} | {status_emoji} {job_state} | {submitted_time} | {duration} | `{livy_id}` |\n"
 
                 markdown += f"\n**Total jobs:** {len(all_jobs)}\n"
 
@@ -908,9 +907,7 @@ async def manage_spark_jobs(
                             duration = "N/A"
 
                     status_emoji = {"Succeeded": "✅", "Failed": "❌", "InProgress": "⏳", "NotStarted": "⏸️", "Cancelled": "🚫"}.get(job_state, "")
-                    short_job_id = str(livy_id)[:8] + "..." if len(str(livy_id)) > 12 else livy_id
-
-                    markdown += f"| `{short_job_id}` | {item_name} | {item_type_val} | {status_emoji} {job_state} | {submitted_time} | {duration} | {operation_name} |\n"
+                    markdown += f"| `{livy_id}` | {item_name} | {item_type_val} | {status_emoji} {job_state} | {submitted_time} | {duration} | {operation_name} |\n"
 
                 markdown += f"\n**Total jobs:** {len(sessions)}\n"
 

@@ -8,7 +8,7 @@ dependencies = [
     "mcp[cli]",
     "azure-identity",
     "deltalake",
-    "requests",
+    "httpx",
     "cachetools",
     "semantic-link-labs",
     "azure-storage-blob",

@@ -16,21 +16,6 @@ logger = get_logger(__name__)
 
 
 @mcp.tool()
-async def set_lakehouse(lakehouse: str, ctx: Context) -> str:
-    """Set the current lakehouse for the session.
-
-    Args:
-        lakehouse: Name or ID of the lakehouse
-        ctx: Context object containing client information
-
-    Returns:
-        A string confirming the lakehouse has been set.
-    """
-    __ctx_cache[f"{ctx.client_id}_lakehouse"] = lakehouse
-    return f"Lakehouse set to '{lakehouse}'."
-
-
-@mcp.tool()
 async def list_lakehouses(workspace: Optional[str] = None, ctx: Context = None) -> str:
     """List all lakehouses in a Fabric workspace.
 

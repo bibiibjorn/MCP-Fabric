@@ -3,7 +3,6 @@ Spark Client for managing Spark job executions (Livy sessions) in Microsoft Fabr
 """
 
 from typing import Optional, Dict, Any, List
-from functools import lru_cache
 from helpers.clients.fabric_client import FabricApiClient
 from helpers.logging_config import get_logger
 from cachetools import TTLCache
@@ -69,7 +68,7 @@ class SparkClient:
             List of Livy session objects
         """
         # Use beta endpoint for filtering support
-        endpoint = f"workspaces/{workspace_id}/spark/livySessions?beta=true"
+        endpoint = f"workspaces/{workspace_id}/spark/livySessions"
         logger.info(f"Listing Livy sessions in workspace {workspace_id}" + (f" (max: {max_results})" if max_results else ""))
 
         # Copy filters to avoid modifying the original dict
@@ -78,6 +77,8 @@ class SparkClient:
         # Extract state filter for client-side filtering (API doesn't reliably filter by state)
         state_filter = filters.pop("state", None)
         params = filters
+        # beta=true enables enhanced filtering on this endpoint
+        params["beta"] = "true"
 
         # Always use pagination to ensure we get all results, then limit client-side
         # The API doesn't guarantee ordering, so we need all results to find the most recent
@@ -256,8 +257,6 @@ class SparkClient:
 
         # Call Microsoft Graph API to get user info
         try:
-            import requests
-
             # Get token for Microsoft Graph
             graph_token = self.client.credential.get_token("https://graph.microsoft.com/.default").token
 
@@ -267,9 +266,10 @@ class SparkClient:
             }
 
             # Get user by ID - request only the fields we need
-            graph_url = f"https://graph.microsoft.com/v1.0/users/{user_id}?$select=displayName,userPrincipalName,mail"
+            graph_url = f"https://graph.microsoft.com/v1.0/users/{user_id}"
+            params = {"$select": "displayName,userPrincipalName,mail"}
 
-            response = requests.get(graph_url, headers=headers, timeout=10)
+            response = await self.client._client.get(graph_url, headers=headers, params=params, timeout=10)
 
             if response.status_code == 200:
                 user_data = response.json()

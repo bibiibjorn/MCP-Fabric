@@ -354,44 +354,42 @@ def _parse_filters_from_json(content: str, source: str = "report") -> List[Dict]
 
 
 @mcp.tool()
-async def get_report_visuals(
+async def get_report_details(
     report: str,
+    aspect: str = "all",
     workspace: Optional[str] = None,
     page_name: Optional[str] = None,
-    ctx: Context = None
+    ctx: Context = None,
 ) -> str:
-    """Get all visuals in a Power BI report with their types and positions.
+    """Get details about a Power BI report's visuals, filters, and bookmarks.
+
+    Combines visual inventory, filter configuration, and bookmark listings
+    into a single tool with an aspect selector.
 
     Args:
         report: Report name or ID
+        aspect: What to retrieve:
+            'visuals' - Visual types, positions, and titles per page
+            'filters' - Report/page/visual-level filters
+            'bookmarks' - Saved bookmarks with target pages
+            'all' - Everything
         workspace: Workspace name or ID (uses context if not provided)
-        page_name: Specific page to get visuals from (optional, gets all pages if not specified)
+        page_name: Filter by specific page (optional, for visuals/filters)
         ctx: Context object
 
     Returns:
-        List of visuals organized by page with:
-        - Visual name/ID
-        - Visual type (chart, table, slicer, etc.)
-        - Position (x, y, width, height)
-        - Title (if set)
-
-    Examples:
-        get_report_visuals("Sales Dashboard")
-        get_report_visuals("Sales Dashboard", page_name="ReportSection1")
+        Report details based on requested aspect
     """
     try:
         credential = get_azure_credentials(ctx.client_id, __ctx_cache)
         fabric_client = FabricApiClient(credential)
         powerbi_client = PowerBIClient(credential)
 
-        # Resolve workspace
         workspace_id = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
         if not workspace_id:
             return "Error: No workspace specified and no workspace context set."
-
         workspace_id = await fabric_client.resolve_workspace(workspace_id)
 
-        # Get parsed definition
         parsed = await _get_report_definition_parsed(
             fabric_client, powerbi_client, workspace_id, report
         )
@@ -399,315 +397,165 @@ async def get_report_visuals(
         report_name = parsed["report_name"]
         page_parts = parsed["page_parts"]
         page_names = parsed["page_names"]
-
-        # Filter by page if specified
-        if page_name:
-            page_parts = [(path, content) for path, content in page_parts
-                         if f"/pages/{page_name}/" in path]
-            if not page_parts:
-                available = ", ".join(sorted(page_names)[:10])
-                return f"Error: Page '{page_name}' not found. Available pages: {available}"
-
-        markdown = f"# Visuals in Report: {report_name}\n\n"
-
-        # Group by page
-        pages_visuals = {}
-        for path, content in page_parts:
-            pn = path.split("/pages/")[-1].split("/")[0] if "/pages/" in path else "Unknown"
-
-            # Only parse page.json or similar definition files
-            if not (path.endswith("page.json") or path.endswith(".json")):
-                continue
-
-            visuals = _parse_visual_from_json(content)
-            if visuals:
-                if pn not in pages_visuals:
-                    pages_visuals[pn] = []
-                pages_visuals[pn].extend(visuals)
-
-        if not pages_visuals:
-            return f"No visuals found in report '{report_name}'. The report may use a format that doesn't expose visual details."
-
-        total_visuals = 0
-        for pn in sorted(pages_visuals.keys()):
-            visuals = pages_visuals[pn]
-            total_visuals += len(visuals)
-
-            markdown += f"## Page: {pn}\n\n"
-            markdown += "| Name | Type | Title | Position (x,y) | Size (w×h) |\n"
-            markdown += "|------|------|-------|----------------|------------|\n"
-
-            for v in visuals:
-                name = v.get("name", "N/A")
-                vtype = v.get("type", "Unknown")
-                title = v.get("title", "-")
-                x, y = v.get("x", 0), v.get("y", 0)
-                w, h = v.get("width", 0), v.get("height", 0)
-                markdown += f"| {name} | {vtype} | {title} | ({x}, {y}) | {w}×{h} |\n"
-
-            markdown += f"\n*{len(visuals)} visual(s) on this page*\n\n"
-
-            # Check response size
-            if len(markdown) > MAX_RESPONSE_SIZE - 500:
-                markdown += "\n*[Response size limit reached]*\n"
-                break
-
-        markdown += f"\n---\n**Total:** {total_visuals} visual(s) across {len(pages_visuals)} page(s)"
-
-        return markdown
-
-    except Exception as e:
-        logger.error(f"Error getting report visuals: {e}")
-        return f"Error getting report visuals: {str(e)}"
-
-
-@mcp.tool()
-async def get_report_filters(
-    report: str,
-    workspace: Optional[str] = None,
-    page_name: Optional[str] = None,
-    ctx: Context = None
-) -> str:
-    """Get all filters configured in a Power BI report.
-
-    Returns report-level, page-level, and visual-level filters.
-
-    Args:
-        report: Report name or ID
-        workspace: Workspace name or ID (uses context if not provided)
-        page_name: Specific page to get filters from (optional)
-        ctx: Context object
-
-    Returns:
-        List of filters organized by scope:
-        - Report-level filters (apply to all pages)
-        - Page-level filters (apply to specific page)
-        - Visual-level filters (apply to specific visual)
-
-        Each filter includes:
-        - Filter name
-        - Target table/column
-        - Filter type (basic, advanced, relative date, etc.)
-
-    Examples:
-        get_report_filters("Sales Dashboard")
-        get_report_filters("Sales Dashboard", page_name="ReportSection1")
-    """
-    try:
-        credential = get_azure_credentials(ctx.client_id, __ctx_cache)
-        fabric_client = FabricApiClient(credential)
-        powerbi_client = PowerBIClient(credential)
-
-        # Resolve workspace
-        workspace_id = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
-        if not workspace_id:
-            return "Error: No workspace specified and no workspace context set."
-
-        workspace_id = await fabric_client.resolve_workspace(workspace_id)
-
-        # Get parsed definition
-        parsed = await _get_report_definition_parsed(
-            fabric_client, powerbi_client, workspace_id, report
-        )
-
-        report_name = parsed["report_name"]
-        config_parts = parsed["config_parts"]
-        page_parts = parsed["page_parts"]
-        page_names = parsed["page_names"]
-
-        markdown = f"# Filters in Report: {report_name}\n\n"
-
-        all_filters = {
-            "report": [],
-            "page": {},
-            "visual": {}
-        }
-
-        # Parse report-level filters from config
-        for path, content in config_parts:
-            filters = _parse_filters_from_json(content, "report")
-            all_filters["report"].extend(filters)
-
-        # Parse page-level and visual-level filters
-        for path, content in page_parts:
-            pn = path.split("/pages/")[-1].split("/")[0] if "/pages/" in path else "Unknown"
-
-            # Skip if filtering by page
-            if page_name and pn != page_name:
-                continue
-
-            filters = _parse_filters_from_json(content, f"page:{pn}")
-
-            for f in filters:
-                if "visual" in f.get("source", "").lower():
-                    if pn not in all_filters["visual"]:
-                        all_filters["visual"][pn] = []
-                    all_filters["visual"][pn].append(f)
-                else:
-                    if pn not in all_filters["page"]:
-                        all_filters["page"][pn] = []
-                    all_filters["page"][pn].append(f)
-
-        # Format report-level filters
-        if all_filters["report"]:
-            markdown += "## Report-Level Filters\n\n"
-            markdown += "| Name | Type | Table | Column |\n"
-            markdown += "|------|------|-------|--------|\n"
-            for f in all_filters["report"]:
-                markdown += f"| {f.get('name', 'N/A')} | {f.get('type', 'N/A')} | {f.get('table', '-')} | {f.get('column', '-')} |\n"
-            markdown += f"\n*{len(all_filters['report'])} report-level filter(s)*\n\n"
-
-        # Format page-level filters
-        if all_filters["page"]:
-            markdown += "## Page-Level Filters\n\n"
-            for pn, filters in sorted(all_filters["page"].items()):
-                markdown += f"### Page: {pn}\n\n"
-                markdown += "| Name | Type | Table | Column |\n"
-                markdown += "|------|------|-------|--------|\n"
-                for f in filters:
-                    markdown += f"| {f.get('name', 'N/A')} | {f.get('type', 'N/A')} | {f.get('table', '-')} | {f.get('column', '-')} |\n"
-                markdown += f"\n*{len(filters)} filter(s) on this page*\n\n"
-
-        # Format visual-level filters
-        if all_filters["visual"]:
-            markdown += "## Visual-Level Filters\n\n"
-            for pn, filters in sorted(all_filters["visual"].items()):
-                markdown += f"### Page: {pn}\n\n"
-                markdown += "| Visual | Name | Type | Table | Column |\n"
-                markdown += "|--------|------|------|-------|--------|\n"
-                for f in filters:
-                    visual = f.get("visual", "-")
-                    markdown += f"| {visual} | {f.get('name', 'N/A')} | {f.get('type', 'N/A')} | {f.get('table', '-')} | {f.get('column', '-')} |\n"
-                markdown += f"\n*{len(filters)} visual filter(s) on this page*\n\n"
-
-        # Summary
-        total_filters = (
-            len(all_filters["report"]) +
-            sum(len(f) for f in all_filters["page"].values()) +
-            sum(len(f) for f in all_filters["visual"].values())
-        )
-
-        if total_filters == 0:
-            markdown += "*No filters found in the report definition. Filters may be configured dynamically or the report uses a format that doesn't expose filter details.*\n"
-        else:
-            markdown += f"\n---\n**Total:** {total_filters} filter(s) found"
-
-        return markdown
-
-    except Exception as e:
-        logger.error(f"Error getting report filters: {e}")
-        return f"Error getting report filters: {str(e)}"
-
-
-@mcp.tool()
-async def get_report_bookmarks(
-    report: str,
-    workspace: Optional[str] = None,
-    ctx: Context = None
-) -> str:
-    """Get all bookmarks saved in a Power BI report.
-
-    Bookmarks capture the current state of a report page including
-    filters, slicers, and visual states.
-
-    Args:
-        report: Report name or ID
-        workspace: Workspace name or ID (uses context if not provided)
-        ctx: Context object
-
-    Returns:
-        List of bookmarks with:
-        - Bookmark name and display name
-        - Target page (if page-specific)
-        - Bookmark type (personal, report)
-
-    Examples:
-        get_report_bookmarks("Sales Dashboard")
-    """
-    try:
-        credential = get_azure_credentials(ctx.client_id, __ctx_cache)
-        fabric_client = FabricApiClient(credential)
-        powerbi_client = PowerBIClient(credential)
-
-        # Resolve workspace
-        workspace_id = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
-        if not workspace_id:
-            return "Error: No workspace specified and no workspace context set."
-
-        workspace_id = await fabric_client.resolve_workspace(workspace_id)
-
-        # Get parsed definition
-        parsed = await _get_report_definition_parsed(
-            fabric_client, powerbi_client, workspace_id, report
-        )
-
-        report_name = parsed["report_name"]
         config_parts = parsed["config_parts"]
         other_parts = parsed["other_parts"]
 
-        markdown = f"# Bookmarks in Report: {report_name}\n\n"
+        markdown = ""
 
-        bookmarks = []
+        # --- Visuals ---
+        if aspect in ("visuals", "all"):
+            filtered_page_parts = page_parts
+            if page_name:
+                filtered_page_parts = [(p, c) for p, c in page_parts if f"/pages/{page_name}/" in p]
+                if not filtered_page_parts:
+                    available = ", ".join(sorted(page_names)[:10])
+                    if aspect == "visuals":
+                        return f"Error: Page '{page_name}' not found. Available pages: {available}"
 
-        # Look for bookmarks in config and other parts
-        all_parts = config_parts + other_parts
+            markdown += f"# Visuals in Report: {report_name}\n\n"
+            pages_visuals = {}
+            for path, content in filtered_page_parts:
+                pn = path.split("/pages/")[-1].split("/")[0] if "/pages/" in path else "Unknown"
+                if not (path.endswith("page.json") or path.endswith(".json")):
+                    continue
+                visuals = _parse_visual_from_json(content)
+                if visuals:
+                    if pn not in pages_visuals:
+                        pages_visuals[pn] = []
+                    pages_visuals[pn].extend(visuals)
 
-        for path, content in all_parts:
-            # Skip binary content
-            if content == "[Binary content]":
-                continue
+            if pages_visuals:
+                total_visuals = 0
+                for pn in sorted(pages_visuals.keys()):
+                    visuals = pages_visuals[pn]
+                    total_visuals += len(visuals)
+                    markdown += f"## Page: {pn}\n\n"
+                    markdown += "| Name | Type | Title | Position (x,y) | Size (w×h) |\n"
+                    markdown += "|------|------|-------|----------------|------------|\n"
+                    for v in visuals:
+                        name = v.get("name", "N/A")
+                        vtype = v.get("type", "Unknown")
+                        title = v.get("title", "-")
+                        x, y = v.get("x", 0), v.get("y", 0)
+                        w, h = v.get("width", 0), v.get("height", 0)
+                        markdown += f"| {name} | {vtype} | {title} | ({x}, {y}) | {w}×{h} |\n"
+                    markdown += f"\n*{len(visuals)} visual(s) on this page*\n\n"
+                    if len(markdown) > MAX_RESPONSE_SIZE - 500:
+                        markdown += "\n*[Response size limit reached]*\n"
+                        break
+                markdown += f"\n---\n**Total:** {total_visuals} visual(s) across {len(pages_visuals)} page(s)\n\n"
+            else:
+                markdown += "*No visuals found.*\n\n"
 
-            try:
-                data = json.loads(content)
+        # --- Filters ---
+        if aspect in ("filters", "all"):
+            markdown += f"# Filters in Report: {report_name}\n\n"
+            all_filters = {"report": [], "page": {}, "visual": {}}
 
-                # Check for bookmarks array
-                bookmark_list = data.get("bookmarks", [])
-                if not bookmark_list and "config" in data:
-                    config = data.get("config", {})
-                    if isinstance(config, str):
-                        try:
-                            config = json.loads(config)
-                        except:
-                            config = {}
-                    bookmark_list = config.get("bookmarks", [])
+            for path, content in config_parts:
+                filters = _parse_filters_from_json(content, "report")
+                all_filters["report"].extend(filters)
 
-                for bm in bookmark_list:
-                    bookmark = {
-                        "name": bm.get("name", bm.get("displayName", "Unknown")),
-                        "displayName": bm.get("displayName", bm.get("name", "")),
-                        "targetPage": bm.get("explorationState", {}).get("activeSection", "-"),
-                        "type": "Report"
-                    }
+            for path, content in page_parts:
+                pn = path.split("/pages/")[-1].split("/")[0] if "/pages/" in path else "Unknown"
+                if page_name and pn != page_name:
+                    continue
+                filters = _parse_filters_from_json(content, f"page:{pn}")
+                for f in filters:
+                    if "visual" in f.get("source", "").lower():
+                        if pn not in all_filters["visual"]:
+                            all_filters["visual"][pn] = []
+                        all_filters["visual"][pn].append(f)
+                    else:
+                        if pn not in all_filters["page"]:
+                            all_filters["page"][pn] = []
+                        all_filters["page"][pn].append(f)
 
-                    # Check if it's a personal bookmark
-                    if bm.get("personal", False):
-                        bookmark["type"] = "Personal"
+            if all_filters["report"]:
+                markdown += "## Report-Level Filters\n\n"
+                markdown += "| Name | Type | Table | Column |\n|------|------|-------|--------|\n"
+                for f in all_filters["report"]:
+                    markdown += f"| {f.get('name', 'N/A')} | {f.get('type', 'N/A')} | {f.get('table', '-')} | {f.get('column', '-')} |\n"
+                markdown += f"\n*{len(all_filters['report'])} report-level filter(s)*\n\n"
 
-                    bookmarks.append(bookmark)
+            if all_filters["page"]:
+                markdown += "## Page-Level Filters\n\n"
+                for pn, filters in sorted(all_filters["page"].items()):
+                    markdown += f"### Page: {pn}\n\n"
+                    markdown += "| Name | Type | Table | Column |\n|------|------|-------|--------|\n"
+                    for f in filters:
+                        markdown += f"| {f.get('name', 'N/A')} | {f.get('type', 'N/A')} | {f.get('table', '-')} | {f.get('column', '-')} |\n"
+                    markdown += f"\n*{len(filters)} filter(s) on this page*\n\n"
 
-            except json.JSONDecodeError:
-                continue
+            if all_filters["visual"]:
+                markdown += "## Visual-Level Filters\n\n"
+                for pn, filters in sorted(all_filters["visual"].items()):
+                    markdown += f"### Page: {pn}\n\n"
+                    markdown += "| Visual | Name | Type | Table | Column |\n|--------|------|------|-------|--------|\n"
+                    for f in filters:
+                        visual = f.get("visual", "-")
+                        markdown += f"| {visual} | {f.get('name', 'N/A')} | {f.get('type', 'N/A')} | {f.get('table', '-')} | {f.get('column', '-')} |\n"
+                    markdown += f"\n*{len(filters)} visual filter(s) on this page*\n\n"
 
-        if not bookmarks:
-            markdown += "*No bookmarks found in the report definition.*\n\n"
-            markdown += "Bookmarks may be:\n"
-            markdown += "- Not configured in this report\n"
-            markdown += "- Personal bookmarks (not included in report definition)\n"
-            markdown += "- Stored in a format not recognized by this tool\n"
-        else:
-            markdown += "| Name | Display Name | Target Page | Type |\n"
-            markdown += "|------|--------------|-------------|------|\n"
+            total_filters = (
+                len(all_filters["report"]) +
+                sum(len(f) for f in all_filters["page"].values()) +
+                sum(len(f) for f in all_filters["visual"].values())
+            )
+            if total_filters == 0:
+                markdown += "*No filters found in the report definition.*\n\n"
+            else:
+                markdown += f"\n---\n**Total:** {total_filters} filter(s) found\n\n"
 
-            for bm in bookmarks:
-                markdown += f"| {bm['name']} | {bm['displayName']} | {bm['targetPage']} | {bm['type']} |\n"
+        # --- Bookmarks ---
+        if aspect in ("bookmarks", "all"):
+            markdown += f"# Bookmarks in Report: {report_name}\n\n"
+            bookmarks = []
+            all_parts = config_parts + other_parts
 
-            markdown += f"\n*{len(bookmarks)} bookmark(s) found*"
+            for path, content in all_parts:
+                if content == "[Binary content]":
+                    continue
+                try:
+                    data = json.loads(content)
+                    bookmark_list = data.get("bookmarks", [])
+                    if not bookmark_list and "config" in data:
+                        config = data.get("config", {})
+                        if isinstance(config, str):
+                            try:
+                                config = json.loads(config)
+                            except Exception:
+                                config = {}
+                        bookmark_list = config.get("bookmarks", [])
+
+                    for bm in bookmark_list:
+                        bookmark = {
+                            "name": bm.get("name", bm.get("displayName", "Unknown")),
+                            "displayName": bm.get("displayName", bm.get("name", "")),
+                            "targetPage": bm.get("explorationState", {}).get("activeSection", "-"),
+                            "type": "Personal" if bm.get("personal", False) else "Report",
+                        }
+                        bookmarks.append(bookmark)
+                except json.JSONDecodeError:
+                    continue
+
+            if not bookmarks:
+                markdown += "*No bookmarks found in the report definition.*\n\n"
+            else:
+                markdown += "| Name | Display Name | Target Page | Type |\n"
+                markdown += "|------|--------------|-------------|------|\n"
+                for bm in bookmarks:
+                    markdown += f"| {bm['name']} | {bm['displayName']} | {bm['targetPage']} | {bm['type']} |\n"
+                markdown += f"\n*{len(bookmarks)} bookmark(s) found*\n\n"
+
+        if not markdown:
+            return f"Error: Unknown aspect '{aspect}'. Use 'visuals', 'filters', 'bookmarks', or 'all'."
 
         return markdown
 
     except Exception as e:
-        logger.error(f"Error getting report bookmarks: {e}")
-        return f"Error getting report bookmarks: {str(e)}"
+        logger.error(f"Error getting report details: {e}")
+        return f"Error getting report details: {str(e)}"
 
 
 @mcp.tool()

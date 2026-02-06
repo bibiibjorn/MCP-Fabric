@@ -1,17 +1,34 @@
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional, Tuple, Union
 import base64
-from urllib.parse import quote
-from functools import lru_cache
-import requests
+import httpx
+import asyncio
+import time
+from cachetools import TTLCache
 from helpers.logging_config import get_logger
 from helpers.utils import _is_valid_uuid
 import json
 from uuid import UUID
 
 logger = get_logger(__name__)
-# from  sempy_labs._helper_functions import create_item
 
+# Module-level metadata cache (5-minute TTL, persists across client instances)
+_metadata_cache = TTLCache(maxsize=200, ttl=300)
+
+# Module-level shared HTTP client for connection pooling across requests
+_shared_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_shared_client() -> httpx.AsyncClient:
+    """Get or create a shared httpx.AsyncClient with connection pooling."""
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(120.0, connect=10.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            follow_redirects=True,
+        )
+    return _shared_client
 
 
 class FabricApiConfig(BaseModel):
@@ -26,68 +43,85 @@ class FabricApiConfig(BaseModel):
 
 
 class FabricApiClient:
-    """Client for communicating with the Fabric API"""
+    """Client for communicating with the Fabric API.
+
+    Performance optimizations:
+    - Shared httpx.AsyncClient with connection pooling (TCP/TLS reuse)
+    - Application-level token caching with early refresh
+    - Non-blocking async retry with exponential backoff
+    - Module-level metadata caching for listing endpoints (5-min TTL)
+    """
+
+    FABRIC_SCOPE = "https://api.fabric.microsoft.com/.default"
 
     def __init__(self, credential, config=None):
         if credential is None:
             raise ValueError("credential is required. Use get_shared_credential() or get_azure_credentials() to obtain one.")
         self.credential = credential
         self.config = config or FabricApiConfig()
-        # Initialize cached methods
-        self._cached_resolve_workspace = lru_cache(maxsize=128)(self._resolve_workspace)
-        self._cached_resolve_lakehouse = lru_cache(maxsize=128)(self._resolve_lakehouse)
+        self._client = _get_shared_client()
+        # Token caching - avoids redundant get_token() calls
+        self._token: Optional[str] = None
+        self._token_expiry: float = 0
+        # Instance-level resolve caches (async-safe replacement for lru_cache)
+        self._workspace_cache: Dict[str, str] = {}
+        self._lakehouse_cache: Dict[str, str] = {}
 
     def _get_headers(self) -> Dict[str, str]:
-        """Get headers for Fabric API calls"""
-        return {
-            "Authorization": f"Bearer {self.credential.get_token('https://api.fabric.microsoft.com/.default').token}"
-        }
+        """Get headers with cached auth token (refreshed 5 min before expiry)."""
+        now = time.time()
+        if not self._token or (self._token_expiry - now) < 300:
+            access_token = self.credential.get_token(self.FABRIC_SCOPE)
+            self._token = access_token.token
+            self._token_expiry = access_token.expires_on
+        return {"Authorization": f"Bearer {self._token}"}
 
-    def _build_url(
-        self, endpoint: str, continuation_token: Optional[str] = None
-    ) -> str:
-        # If the endpoint starts with http, use it as-is.
-        url = (
+    def _build_url(self, endpoint: str) -> str:
+        """Build full URL from endpoint. Do NOT embed query params in the URL
+        when also passing params dict to httpx (httpx replaces URL query params
+        with the params dict, unlike requests which merges them)."""
+        return (
             endpoint
             if endpoint.startswith("http")
             else f"{self.config.base_url}/{endpoint.lstrip('/')}"
         )
-        if continuation_token:
-            separator = "&" if "?" in url else "?"
-            encoded_token = quote(continuation_token)
-            url += f"{separator}continuationToken={encoded_token}"
-        return url
 
-    def _execute_with_retry(
+    async def _execute_with_retry(
         self,
-        request_func,
+        method: str,
+        url: str,
         max_retries: Optional[int] = None,
-    ) -> requests.Response:
+        **kwargs,
+    ) -> httpx.Response:
         """
-        Execute a request function with automatic retry on throttling (429 responses).
+        Execute an HTTP request with automatic retry on throttling (429 responses).
+        Auth headers are refreshed on each retry attempt.
 
         Implements Microsoft Fabric API best practices:
         - Respects Retry-After header
         - Uses exponential backoff for subsequent retries
-        - Logs throttling events for monitoring
+        - Non-blocking async sleep during waits
 
         Args:
-            request_func: A callable that returns a requests.Response
+            method: HTTP method (GET, POST, etc.)
+            url: The full URL to request
             max_retries: Maximum number of retries (defaults to config value)
+            **kwargs: Additional arguments passed to httpx.AsyncClient.request()
+                      (e.g., json=, params=, timeout=, content=)
 
         Returns:
-            The successful response
+            The successful httpx.Response
 
         Raises:
-            requests.RequestException: If all retries are exhausted
+            httpx.HTTPStatusError: If all retries are exhausted
         """
-        import time
-
         max_retries = max_retries or self.config.max_retries
         retry_count = 0
 
         while retry_count <= max_retries:
-            response = request_func()
+            response = await self._client.request(
+                method, url, headers=self._get_headers(), **kwargs
+            )
 
             if response.status_code == 429:  # Too Many Requests (Throttled)
                 if retry_count >= max_retries:
@@ -113,7 +147,7 @@ class FabricApiClient:
                     f"Consider reducing request frequency."
                 )
 
-                time.sleep(retry_after)
+                await asyncio.sleep(retry_after)
                 retry_count += 1
                 continue
 
@@ -135,43 +169,32 @@ class FabricApiClient:
         lro_timeout: int = 300,  # max seconds to wait
     ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         """
-        Make an asynchronous call to the Fabric API.
+        Make an async request to the Fabric API with connection pooling.
 
         If use_pagination is True, it will automatically handle paginated responses.
 
         If lro is True, will poll for long-running operation completion.
         """
-        import time
-
         params = params or {}
 
         if not use_pagination:
             url = self._build_url(endpoint=endpoint)
             try:
-                if method.upper() == "POST":
-                    # Use retry wrapper for throttling protection
-                    response = self._execute_with_retry(
-                        lambda: requests.post(
-                            url,
-                            headers=self._get_headers(),
-                            json=params,
-                            timeout=120,
-                        )
+                if method.upper() in ("POST", "PATCH", "PUT"):
+                    response = await self._execute_with_retry(
+                        method.upper(), url, json=params
                     )
-                else:
+                elif method.upper() == "DELETE":
+                    response = await self._execute_with_retry(
+                        "DELETE", url, params=params
+                    )
+                else:  # GET
                     if "maxResults" not in params:
                         params["maxResults"] = self.config.max_results
-                    # Use retry wrapper for throttling protection
-                    response = self._execute_with_retry(
-                        lambda url=url, params=params: requests.request(
-                            method=method.upper(),
-                            url=url,
-                            headers=self._get_headers(),
-                            params=params,
-                            timeout=120,
-                        )
+                    response = await self._execute_with_retry(
+                        method.upper(), url, params=params
                     )
-    
+
                 # LRO support: check for 202 and Operation-Location or Location header
                 if lro and response.status_code == 202:
                     # Fabric API uses different headers for LRO
@@ -186,13 +209,10 @@ class FabricApiClient:
                         retry_after = response.headers.get("Retry-After")
                         if retry_after:
                             logger.info(f"LRO: Retry-After header found, waiting {retry_after}s...")
-                            time.sleep(int(retry_after))
+                            await asyncio.sleep(int(retry_after))
                             # Retry the same request
-                            response = requests.post(
-                                url,
-                                headers=self._get_headers(),
-                                json=params,
-                                timeout=120,
+                            response = await self._execute_with_retry(
+                                "POST", url, json=params
                             )
                             if response.status_code == 200:
                                 return response.json()
@@ -202,11 +222,8 @@ class FabricApiClient:
                     logger.info(f"LRO: Polling {op_url} for operation status...")
                     start_time = time.time()
                     while True:
-                        # Use retry wrapper for LRO polling (throttling protection)
-                        poll_resp = self._execute_with_retry(
-                            lambda: requests.get(
-                                op_url, headers=self._get_headers(), timeout=60
-                            )
+                        poll_resp = await self._execute_with_retry(
+                            "GET", op_url, timeout=60
                         )
                         if poll_resp.status_code not in (200, 201, 202):
                             logger.error(
@@ -229,11 +246,8 @@ class FabricApiClient:
                             if "/operations/" in op_url:
                                 result_url = op_url.rstrip("/") + "/result"
                                 logger.info(f"LRO: Fetching result from {result_url}")
-                                # Use retry wrapper for result fetch (throttling protection)
-                                result_resp = self._execute_with_retry(
-                                    lambda: requests.get(
-                                        result_url, headers=self._get_headers(), timeout=60
-                                    )
+                                result_resp = await self._execute_with_retry(
+                                    "GET", result_url, timeout=60
                                 )
                                 if result_resp.status_code == 200:
                                     return result_resp.json()
@@ -253,12 +267,12 @@ class FabricApiClient:
                         logger.debug(
                             f"LRO: Status {status}, waiting {lro_poll_interval}s..."
                         )
-                        time.sleep(lro_poll_interval)
+                        await asyncio.sleep(lro_poll_interval)
                 response.raise_for_status()
                 return response.json()
-            except requests.RequestException as e:
+            except httpx.HTTPError as e:
                 logger.error(f"API call failed: {str(e)}")
-                if e.response is not None:
+                if hasattr(e, 'response') and e.response is not None:
                     logger.error(f"Response content: {e.response.text}")
                 return None
         else:
@@ -267,41 +281,26 @@ class FabricApiClient:
             results = []
             continuation_token = None
             while True:
-                url = self._build_url(
-                    endpoint=endpoint, continuation_token=continuation_token
-                )
+                url = self._build_url(endpoint=endpoint)
                 request_params = params.copy()
-                # Remove any existing continuationToken in parameters to avoid conflict.
-                request_params.pop("continuationToken", None)
+                if continuation_token:
+                    request_params["continuationToken"] = continuation_token
                 try:
                     if method.upper() == "POST":
-                        # Use retry wrapper for throttling protection
-                        response = self._execute_with_retry(
-                            lambda url=url, request_params=request_params: requests.post(
-                                url,
-                                headers=self._get_headers(),
-                                json=request_params,
-                                timeout=120,
-                            )
+                        response = await self._execute_with_retry(
+                            "POST", url, json=request_params
                         )
                     else:
                         if "maxResults" not in request_params:
                             request_params["maxResults"] = self.config.max_results
-                        # Use retry wrapper for throttling protection
-                        response = self._execute_with_retry(
-                            lambda url=url, request_params=request_params: requests.request(
-                                method=method.upper(),
-                                url=url,
-                                headers=self._get_headers(),
-                                params=request_params,
-                                timeout=120,
-                            )
+                        response = await self._execute_with_retry(
+                            method.upper(), url, params=request_params
                         )
                     response.raise_for_status()
                     data = response.json()
-                except requests.RequestException as e:
+                except httpx.HTTPError as e:
                     logger.error(f"API call failed: {str(e)}")
-                    if e.response is not None:
+                    if hasattr(e, 'response') and e.response is not None:
                         logger.error(f"Response content: {e.response.text}")
                     return results if results else None
 
@@ -315,8 +314,15 @@ class FabricApiClient:
             return results
 
     async def get_workspaces(self) -> List[Dict]:
-        """Get all available workspaces"""
-        return await self._make_request("workspaces", use_pagination=True)
+        """Get all available workspaces (cached for 5 minutes)"""
+        cache_key = "workspaces"
+        cached = _metadata_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = await self._make_request("workspaces", use_pagination=True)
+        if result is not None:
+            _metadata_cache[cache_key] = result
+        return result
 
     async def get_workspace(self, workspace_id: str) -> Dict:
         """Get a specific workspace by ID
@@ -358,17 +364,24 @@ class FabricApiClient:
         )
 
     async def get_reports(self, workspace_id: str) -> List[Dict]:
-        """Get all reports in a lakehouse
+        """Get all reports in a workspace (cached for 5 minutes)
         Args:
             workspace_id: ID of the workspace
         Returns:
             A list of dictionaries containing report details or an error message.
         """
-        return await self._make_request(
+        cache_key = f"reports:{workspace_id}"
+        cached = _metadata_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = await self._make_request(
             f"workspaces/{workspace_id}/reports",
             use_pagination=True,
             data_key="value",
         )
+        if result is not None:
+            _metadata_cache[cache_key] = result
+        return result
 
     async def get_report(self, workspace_id: str, report_id: str) -> Dict:
         """Get a specific report by ID
@@ -385,12 +398,19 @@ class FabricApiClient:
         )
 
     async def get_semantic_models(self, workspace_id: str) -> List[Dict]:
-        """Get all semantic models in a lakehouse"""
-        return await self._make_request(
+        """Get all semantic models in a workspace (cached for 5 minutes)"""
+        cache_key = f"models:{workspace_id}"
+        cached = _metadata_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = await self._make_request(
             f"workspaces/{workspace_id}/semanticModels",
             use_pagination=True,
             data_key="value",
         )
+        if result is not None:
+            _metadata_cache[cache_key] = result
+        return result
 
     async def get_semantic_model(self, workspace_id: str, model_id: str) -> Dict:
         """Get a specific semantic model by ID"""
@@ -400,7 +420,11 @@ class FabricApiClient:
 
     async def resolve_workspace(self, workspace: str) -> str:
         """Convert workspace name or ID to workspace ID with caching"""
-        return await self._cached_resolve_workspace(workspace)
+        if workspace in self._workspace_cache:
+            return self._workspace_cache[workspace]
+        result = await self._resolve_workspace(workspace)
+        self._workspace_cache[workspace] = result
+        return result
 
     async def _resolve_workspace(self, workspace: str) -> str:
         """Internal method to convert workspace name or ID to workspace ID"""
@@ -421,7 +445,12 @@ class FabricApiClient:
 
     async def resolve_lakehouse(self, workspace_id: str, lakehouse: str) -> str:
         """Convert lakehouse name or ID to lakehouse ID with caching"""
-        return await self._cached_resolve_lakehouse(workspace_id, lakehouse)
+        cache_key = f"{workspace_id}:{lakehouse}"
+        if cache_key in self._lakehouse_cache:
+            return self._lakehouse_cache[cache_key]
+        result = await self._resolve_lakehouse(workspace_id, lakehouse)
+        self._lakehouse_cache[cache_key] = result
+        return result
 
     async def _resolve_lakehouse(self, workspace_id: str, lakehouse: str) -> str:
         """Internal method to convert lakehouse name or ID to lakehouse ID"""
@@ -446,15 +475,26 @@ class FabricApiClient:
         item_type: Optional[str] = None,
         params: Optional[Dict] = None,
     ) -> List[Dict]:
-        """Get all items in a workspace"""
+        """Get all items in a workspace (cached for 5 minutes when item_type specified)"""
         if not _is_valid_uuid(workspace_id):
             raise ValueError("Invalid workspace ID.")
+
+        cache_key = None
         if item_type:
             params = params or {}
             params["type"] = item_type
-        return await self._make_request(
+            cache_key = f"items:{workspace_id}:{item_type}"
+            cached = _metadata_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        result = await self._make_request(
             f"workspaces/{workspace_id}/items", params=params, use_pagination=True
         )
+
+        if cache_key and result is not None:
+            _metadata_cache[cache_key] = result
+        return result
 
     async def get_item(
         self,
@@ -527,33 +567,33 @@ class FabricApiClient:
                 lro=lro,
                 lro_poll_interval=0.5,
             )
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             logger.error(f"API call failed: {str(e)}")
-            if e.response is not None:
+            if hasattr(e, 'response') and e.response is not None:
                 logger.error(f"Response content: {e.response.text}")
             raise ValueError(
                 f"Failed to create item '{name}' of type '{item_type}' in the '{workspace_id}' workspace."
-            )        
-        
+            )
+
         # Check if response contains an error
         if isinstance(response, dict):
             if "error" in response:
                 error_msg = response.get("error", {}).get("message", "Unknown error")
                 logger.error(f"API error creating item: {error_msg}")
                 raise ValueError(f"Failed to create item '{name}': {error_msg}")
-            
+
             # Check if item was created successfully
             if "id" in response:
                 logger.info(f"Successfully created item '{name}' with ID: {response['id']}")
                 return response
-            
+
             # If no ID and no error, log the full response for debugging
             logger.warning(f"Unexpected response format: {response}")
-        
+
         # Legacy check - may not be reliable for all item types
         if hasattr(response, 'get') and response.get("displayName") and response.get("displayName") != name:
             logger.warning(f"Response displayName '{response.get('displayName')}' doesn't match requested name '{name}', but this may be normal")
-        
+
         return response
 
     async def resolve_item_name_and_id(
@@ -589,10 +629,10 @@ class FabricApiClient:
             # Check (optional)
             item_id = item
             try:
-                self._make_request(
+                await self._make_request(
                     endpoint=f"workspaces/{workspace_id}/items/{item_id}"
                 )
-            except requests.RequestException:
+            except httpx.HTTPError:
                 raise ValueError(
                     f"The '{item_id}' item was not found in the '{workspace_name}' workspace."
                 )
@@ -602,7 +642,8 @@ class FabricApiClient:
                     "The 'type' parameter is required if specifying an item name."
                 )
             responses = await self._make_request(
-                endpoint=f"workspaces/{workspace_id}/items?type={type}",
+                endpoint=f"workspaces/{workspace_id}/items",
+                params={"type": type},
                 use_pagination=True,
             )
             for v in responses:
@@ -669,7 +710,7 @@ class FabricApiClient:
                 raise ValueError(
                     f"Workspace '{workspace_id}' not found or API response invalid: {response}"
                 )
-        except requests.RequestException:
+        except httpx.HTTPError:
             raise ValueError(f"The '{workspace_id}' workspace was not found.")
 
         return response.get("displayName")
@@ -733,11 +774,6 @@ class FabricApiClient:
                     ).decode("utf-8"),
                     "payloadType": "InlineBase64",
                 },
-                # {
-                #     "path": ".platform",
-                #     "payload": base64.b64encode("dotPlatformBase64String".encode("utf-8")).decode("utf-8"),
-                #     "payloadType": "InlineBase64",
-                # },
             ],
         }
         logger.info(

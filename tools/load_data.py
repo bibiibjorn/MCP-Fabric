@@ -10,7 +10,7 @@ from helpers.clients import (
 from helpers.logging_config import get_logger
 import tempfile
 import os
-import requests
+import httpx
 from typing import Optional
 
 logger = get_logger(__name__)
@@ -39,7 +39,7 @@ async def load_data_from_url(
     """
     try:
         # Download the file
-        response = requests.get(url)
+        response = httpx.get(url)
         if response.status_code != 200:
             return f"Failed to download file from URL: {url}"
         file_ext = url.split("?")[0].split(".")[-1].lower()

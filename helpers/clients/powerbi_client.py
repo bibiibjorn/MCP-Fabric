@@ -3,10 +3,16 @@ Power BI REST API Client for DAX queries and report operations.
 
 This client is separate from the Fabric API client because Power BI REST API
 uses a different scope (analysis.windows.net) and base URL (api.powerbi.com).
+
+Performance optimizations:
+- Shared httpx.AsyncClient with connection pooling (TCP/TLS reuse)
+- Application-level token caching with early refresh
+- Non-blocking async retry with exponential backoff
 """
 
 from typing import Dict, Any, List, Optional
-import requests
+import httpx
+import asyncio
 import time
 from helpers.logging_config import get_logger
 from helpers.utils import _is_valid_uuid
@@ -15,6 +21,21 @@ logger = get_logger(__name__)
 
 # Power BI API scope (different from Fabric API scope)
 POWERBI_SCOPE = "https://analysis.windows.net/powerbi/api/.default"
+
+# Module-level shared HTTP client for connection pooling
+_shared_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_shared_client() -> httpx.AsyncClient:
+    """Get or create a shared httpx.AsyncClient with connection pooling."""
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(120.0, connect=10.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            follow_redirects=True,
+        )
+    return _shared_client
 
 
 class PowerBIClient:
@@ -41,12 +62,20 @@ class PowerBIClient:
         self.max_retries = self.config.get("max_retries", 3)
         self.default_retry_after = self.config.get("default_retry_after", 60)
         self.enable_exponential_backoff = self.config.get("enable_exponential_backoff", True)
+        self._client = _get_shared_client()
+        # Token caching - avoids redundant get_token() calls
+        self._token: Optional[str] = None
+        self._token_expiry: float = 0
 
     def _get_headers(self) -> Dict[str, str]:
-        """Get headers for Power BI API calls."""
-        token = self.credential.get_token(POWERBI_SCOPE).token
+        """Get headers with cached auth token (refreshed 5 min before expiry)."""
+        now = time.time()
+        if not self._token or (self._token_expiry - now) < 300:
+            access_token = self.credential.get_token(POWERBI_SCOPE)
+            self._token = access_token.token
+            self._token_expiry = access_token.expires_on
         return {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {self._token}",
             "Content-Type": "application/json"
         }
 
@@ -64,24 +93,35 @@ class PowerBIClient:
             return f"{self.BASE_URL}/groups/{workspace_id}/{endpoint}"
         return f"{self.BASE_URL}/{endpoint}"
 
-    def _execute_with_retry(self, request_func, max_retries: Optional[int] = None) -> requests.Response:
-        """Execute a request with automatic retry on throttling (429 responses).
+    async def _execute_with_retry(
+        self,
+        method: str,
+        url: str,
+        max_retries: Optional[int] = None,
+        **kwargs,
+    ) -> httpx.Response:
+        """Execute an HTTP request with automatic retry on throttling (429 responses).
+        Auth headers are refreshed on each retry attempt.
 
         Args:
-            request_func: A callable that returns a requests.Response
+            method: HTTP method (GET, POST, etc.)
+            url: The full URL to request
             max_retries: Maximum number of retries (defaults to config value)
+            **kwargs: Additional arguments passed to httpx.AsyncClient.request()
 
         Returns:
-            The successful response
+            The successful httpx.Response
 
         Raises:
-            requests.RequestException: If all retries are exhausted
+            httpx.HTTPStatusError: If all retries are exhausted
         """
         max_retries = max_retries or self.max_retries
         retry_count = 0
 
         while retry_count <= max_retries:
-            response = request_func()
+            response = await self._client.request(
+                method, url, headers=self._get_headers(), **kwargs
+            )
 
             if response.status_code == 429:  # Too Many Requests (Throttled)
                 if retry_count >= max_retries:
@@ -101,7 +141,7 @@ class PowerBIClient:
                     f"{retry_count + 1}/{max_retries}."
                 )
 
-                time.sleep(retry_after)
+                await asyncio.sleep(retry_after)
                 retry_count += 1
                 continue
 
@@ -145,14 +185,7 @@ class PowerBIClient:
             payload["impersonatedUserName"] = impersonated_user_name
 
         try:
-            response = self._execute_with_retry(
-                lambda: requests.post(
-                    url,
-                    headers=self._get_headers(),
-                    json=payload,
-                    timeout=120
-                )
-            )
+            response = await self._execute_with_retry("POST", url, json=payload)
 
             if response.status_code == 400:
                 error_data = response.json()
@@ -167,14 +200,15 @@ class PowerBIClient:
             response.raise_for_status()
             return response.json()
 
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             if hasattr(e, 'response') and e.response is not None:
                 try:
                     error_data = e.response.json()
+                except Exception:
+                    pass
+                else:
                     error_message = error_data.get("error", {}).get("message", str(e))
                     raise ValueError(f"DAX query failed: {error_message}")
-                except ValueError:
-                    pass
             logger.error(f"DAX query execution failed: {e}")
             raise ValueError(f"DAX query execution failed: {str(e)}")
 
@@ -195,19 +229,13 @@ class PowerBIClient:
         url = self._build_url(f"reports/{report_id}/pages", workspace_id)
 
         try:
-            response = self._execute_with_retry(
-                lambda: requests.get(
-                    url,
-                    headers=self._get_headers(),
-                    timeout=60
-                )
-            )
+            response = await self._execute_with_retry("GET", url, timeout=60)
 
             response.raise_for_status()
             data = response.json()
             return data.get("value", [])
 
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             logger.error(f"Failed to get report pages: {e}")
             raise ValueError(f"Failed to get report pages: {str(e)}")
 
@@ -258,14 +286,7 @@ class PowerBIClient:
             payload["powerBIReportConfiguration"]["reportLevelFilters"] = report_level_filters
 
         try:
-            response = self._execute_with_retry(
-                lambda: requests.post(
-                    url,
-                    headers=self._get_headers(),
-                    json=payload,
-                    timeout=120
-                )
-            )
+            response = await self._execute_with_retry("POST", url, json=payload)
 
             if response.status_code == 403:
                 raise ValueError(
@@ -276,7 +297,7 @@ class PowerBIClient:
             response.raise_for_status()
             return response.json()
 
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             logger.error(f"Failed to start report export: {e}")
             raise ValueError(f"Failed to start report export: {str(e)}")
 
@@ -302,18 +323,12 @@ class PowerBIClient:
         url = self._build_url(f"reports/{report_id}/exports/{export_id}", workspace_id)
 
         try:
-            response = self._execute_with_retry(
-                lambda: requests.get(
-                    url,
-                    headers=self._get_headers(),
-                    timeout=60
-                )
-            )
+            response = await self._execute_with_retry("GET", url, timeout=60)
 
             response.raise_for_status()
             return response.json()
 
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             logger.error(f"Failed to get export status: {e}")
             raise ValueError(f"Failed to get export status: {str(e)}")
 
@@ -336,18 +351,14 @@ class PowerBIClient:
         url = self._build_url(f"reports/{report_id}/exports/{export_id}/file", workspace_id)
 
         try:
-            response = self._execute_with_retry(
-                lambda: requests.get(
-                    url,
-                    headers=self._get_headers(),
-                    timeout=300  # Longer timeout for file download
-                )
+            response = await self._execute_with_retry(
+                "GET", url, timeout=300  # Longer timeout for file download
             )
 
             response.raise_for_status()
             return response.content
 
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             logger.error(f"Failed to download export file: {e}")
             raise ValueError(f"Failed to download export file: {str(e)}")
 
@@ -395,7 +406,7 @@ class PowerBIClient:
             percent = status.get("percentComplete", 0)
             logger.debug(f"Export status: {current_status}, {percent}% complete")
 
-            time.sleep(poll_interval)
+            await asyncio.sleep(poll_interval)
 
     async def resolve_dataset_id(
         self,
@@ -491,18 +502,12 @@ class PowerBIClient:
         url = self._build_url(f"datasets/{dataset_id}/refreshes?$top={top}", workspace_id)
 
         try:
-            response = self._execute_with_retry(
-                lambda: requests.get(
-                    url,
-                    headers=self._get_headers(),
-                    timeout=60
-                )
-            )
+            response = await self._execute_with_retry("GET", url, timeout=60)
 
             response.raise_for_status()
             data = response.json()
             return data.get("value", [])
 
-        except requests.RequestException as e:
+        except httpx.HTTPError as e:
             logger.error(f"Failed to get refresh history: {e}")
             raise ValueError(f"Failed to get refresh history: {str(e)}")

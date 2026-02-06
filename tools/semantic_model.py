@@ -513,65 +513,6 @@ async def get_semantic_model(
 
 
 @mcp.tool()
-async def set_semantic_model(
-    dataset: str,
-    workspace: Optional[str] = None,
-    ctx: Context = None
-) -> str:
-    """Set the current semantic model context for subsequent operations.
-
-    This sets the default semantic model to use for DAX queries, measure evaluation,
-    and other operations that require a dataset/semantic model.
-
-    Args:
-        dataset: Dataset/semantic model name or ID
-        workspace: Workspace name or ID (uses current context if not provided)
-        ctx: Context object
-
-    Returns:
-        Confirmation message with the set context
-
-    Example:
-        set_semantic_model("Sales Model", workspace="Finvision")
-    """
-    try:
-        credential = get_azure_credentials(ctx.client_id, __ctx_cache)
-        fabric_client = FabricApiClient(credential)
-        powerbi_client = PowerBIClient(credential)
-
-        # Resolve workspace
-        workspace_id = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
-        if not workspace_id:
-            return "Error: No workspace specified and no workspace context set. Use set_workspace first or provide workspace parameter."
-
-        workspace_id = await fabric_client.resolve_workspace(workspace_id)
-
-        # Resolve dataset to ID
-        dataset_id = await powerbi_client.resolve_dataset_id(workspace_id, dataset, fabric_client)
-
-        # Get dataset name for confirmation
-        models = await fabric_client.get_semantic_models(workspace_id)
-        model_name = next(
-            (m.get("displayName") for m in models if m.get("id") == dataset_id),
-            dataset
-        )
-
-        # Store in context
-        __ctx_cache[f"{ctx.client_id}_semantic_model"] = dataset_id
-        __ctx_cache[f"{ctx.client_id}_semantic_model_name"] = model_name
-
-        # Also update workspace context if it was provided
-        if workspace:
-            __ctx_cache[f"{ctx.client_id}_workspace"] = workspace_id
-
-        return f"✓ Semantic model context set to '{model_name}' (ID: {dataset_id})"
-
-    except Exception as e:
-        logger.error(f"Error setting semantic model: {e}")
-        return f"Error setting semantic model: {str(e)}"
-
-
-@mcp.tool()
 async def execute_dax_query(
     dax_query: str,
     workspace: Optional[str] = None,
@@ -838,161 +779,35 @@ async def evaluate_measure(
 
 
 @mcp.tool()
-async def get_semantic_model_schema(
-    workspace: Optional[str] = None,
-    dataset: Optional[str] = None,
-    ctx: Context = None
-) -> str:
-    """Get the schema of a semantic model (tables, columns, measures, relationships).
-
-    Uses the Fabric API getDefinition endpoint to retrieve the model definition.
-
-    Args:
-        workspace: Workspace name or ID
-        dataset: Dataset/semantic model name or ID
-        ctx: Context object
-
-    Returns:
-        Model schema including:
-        - Tables with columns and data types
-        - Measures with DAX expressions
-        - Relationships between tables
-
-    Note:
-        Requires read access to the semantic model definition.
-    """
-    try:
-        credential = get_azure_credentials(ctx.client_id, __ctx_cache)
-        fabric_client = FabricApiClient(credential)
-        powerbi_client = PowerBIClient(credential)
-
-        # Resolve workspace
-        workspace_id = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
-        if not workspace_id:
-            return "Error: No workspace specified and no workspace context set."
-
-        workspace_id = await fabric_client.resolve_workspace(workspace_id)
-
-        # Resolve dataset
-        dataset_name = dataset or __ctx_cache.get(f"{ctx.client_id}_semantic_model_name")
-        dataset_id = dataset or __ctx_cache.get(f"{ctx.client_id}_semantic_model")
-        if not dataset_id:
-            return "Error: No dataset specified and no semantic model context set."
-
-        dataset_id = await powerbi_client.resolve_dataset_id(workspace_id, dataset_id, fabric_client)
-
-        # Get model name for display
-        if not dataset_name or dataset_name == dataset_id:
-            models = await fabric_client.get_semantic_models(workspace_id)
-            model_info = next((m for m in models if m.get("id") == dataset_id), {})
-            dataset_name = model_info.get("displayName", dataset_id)
-
-        # Call getDefinition endpoint via Fabric API
-        logger.info(f"Getting schema for semantic model {dataset_id}")
-
-        definition = await fabric_client._make_request(
-            f"workspaces/{workspace_id}/semanticModels/{dataset_id}/getDefinition",
-            method="POST",
-            lro=True,
-            lro_poll_interval=2,
-            lro_timeout=120
-        )
-
-        if not definition:
-            return f"Error: Could not retrieve definition for semantic model '{dataset_name}'"
-
-        # Parse the definition and format as markdown
-        markdown = f"# Schema: {dataset_name}\n\n"
-
-        # The definition contains parts with TMDL files
-        parts = definition.get("definition", {}).get("parts", [])
-
-        if not parts:
-            return f"No schema definition found for '{dataset_name}'"
-
-        # Extract and decode TMDL content
-        tables_content = []
-        relationships_content = []
-        model_content = []
-
-        for part in parts:
-            path = part.get("path", "")
-            payload = part.get("payload", "")
-
-            if not payload:
-                continue
-
-            try:
-                content = base64.b64decode(payload).decode("utf-8")
-            except Exception:
-                continue
-
-            if "/tables/" in path and path.endswith(".tmdl"):
-                tables_content.append((path, content))
-            elif "relationships.tmdl" in path:
-                relationships_content.append(content)
-            elif "model.tmdl" in path:
-                model_content.append(content)
-
-        # Format tables
-        if tables_content:
-            markdown += "## Tables\n\n"
-            for path, content in sorted(tables_content):
-                table_name = path.split("/tables/")[-1].replace(".tmdl", "") if "/tables/" in path else "Unknown"
-                markdown += f"### {table_name}\n\n```\n{content[:2000]}{'...' if len(content) > 2000 else ''}\n```\n\n"
-
-        # Format relationships
-        if relationships_content:
-            markdown += "## Relationships\n\n"
-            for content in relationships_content:
-                markdown += f"```\n{content[:2000]}{'...' if len(content) > 2000 else ''}\n```\n\n"
-
-        # Summary
-        markdown += f"\n*{len(tables_content)} table(s) found*"
-
-        return markdown
-
-    except Exception as e:
-        logger.error(f"Error getting semantic model schema: {e}")
-        return f"Error getting semantic model schema: {str(e)}"
-
-
-@mcp.tool()
-async def get_semantic_model_measures(
+async def get_semantic_model_metadata(
+    aspect: str = "all",
     workspace: Optional[str] = None,
     dataset: Optional[str] = None,
     search: Optional[str] = None,
     include_expression: bool = True,
-    ctx: Context = None
+    include_hidden: bool = False,
+    ctx: Context = None,
 ) -> str:
-    """List all measures in a semantic model with their DAX expressions.
+    """Get metadata about a semantic model's structure.
 
-    This tool is essential for understanding what calculations are available in the model.
-    Use this before evaluating measures to find the correct measure names.
+    Retrieves schema, measures, and/or table definitions from the model's TMDL.
+    Combines the capabilities of getting schema, measures, and table listings.
 
     Args:
+        aspect: What to retrieve:
+            'schema' - Full TMDL definition with tables, relationships
+            'measures' - DAX measures with expressions
+            'tables' - Table and column listings with data types
+            'all' - Everything (schema + measures + tables)
         workspace: Workspace name or ID (uses context if not provided)
         dataset: Dataset/semantic model name or ID (uses context if not provided)
-        search: Optional search term to filter measures (case-insensitive)
-        include_expression: Whether to include the DAX expression (default: True)
+        search: Filter measures by search term (only for aspect='measures' or 'all')
+        include_expression: Include DAX expressions for measures (default: True)
+        include_hidden: Include hidden columns in tables (default: False)
         ctx: Context object
 
     Returns:
-        List of measures with:
-        - Measure name
-        - Table where measure is defined
-        - DAX expression
-        - Format string (if defined)
-        - Description (if defined)
-        - Display folder (if defined)
-
-    Examples:
-        get_semantic_model_measures()  # List all measures
-        get_semantic_model_measures(search="net asset")  # Find measures containing "net asset"
-        get_semantic_model_measures(search="revenue", include_expression=False)  # Names only
-
-    Note:
-        Use this tool to discover available measures before using evaluate_measure.
+        Model metadata based on requested aspect
     """
     try:
         credential = get_azure_credentials(ctx.client_id, __ctx_cache)
@@ -1003,7 +818,6 @@ async def get_semantic_model_measures(
         workspace_id = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
         if not workspace_id:
             return "Error: No workspace specified and no workspace context set."
-
         workspace_id = await fabric_client.resolve_workspace(workspace_id)
 
         # Resolve dataset
@@ -1011,7 +825,6 @@ async def get_semantic_model_measures(
         dataset_id = dataset or __ctx_cache.get(f"{ctx.client_id}_semantic_model")
         if not dataset_id:
             return "Error: No dataset specified and no semantic model context set."
-
         dataset_id = await powerbi_client.resolve_dataset_id(workspace_id, dataset_id, fabric_client)
 
         # Get model name for display
@@ -1020,85 +833,161 @@ async def get_semantic_model_measures(
             model_info = next((m for m in models if m.get("id") == dataset_id), {})
             dataset_name = model_info.get("displayName", dataset_id)
 
-        logger.info(f"Getting measures for semantic model {dataset_id}")
+        logger.info(f"Getting metadata (aspect={aspect}) for semantic model {dataset_id}")
 
-        # Get TMDL parts
+        if aspect == "schema":
+            # Full TMDL schema view
+            definition = await fabric_client._make_request(
+                f"workspaces/{workspace_id}/semanticModels/{dataset_id}/getDefinition",
+                method="POST",
+                lro=True,
+                lro_poll_interval=2,
+                lro_timeout=120,
+            )
+
+            if not definition:
+                return f"Error: Could not retrieve definition for '{dataset_name}'"
+
+            parts = definition.get("definition", {}).get("parts", [])
+            if not parts:
+                return f"No schema definition found for '{dataset_name}'"
+
+            markdown = f"# Schema: {dataset_name}\n\n"
+            tables_content = []
+            relationships_content = []
+
+            for part in parts:
+                path = part.get("path", "")
+                payload = part.get("payload", "")
+                if not payload:
+                    continue
+                try:
+                    content = base64.b64decode(payload).decode("utf-8")
+                except Exception:
+                    continue
+                if "/tables/" in path and path.endswith(".tmdl"):
+                    tables_content.append((path, content))
+                elif "relationships.tmdl" in path:
+                    relationships_content.append(content)
+
+            if tables_content:
+                markdown += "## Tables\n\n"
+                for path, content in sorted(tables_content):
+                    table_name = path.split("/tables/")[-1].replace(".tmdl", "") if "/tables/" in path else "Unknown"
+                    markdown += f"### {table_name}\n\n```\n{content[:2000]}{'...' if len(content) > 2000 else ''}\n```\n\n"
+
+            if relationships_content:
+                markdown += "## Relationships\n\n"
+                for content in relationships_content:
+                    markdown += f"```\n{content[:2000]}{'...' if len(content) > 2000 else ''}\n```\n\n"
+
+            markdown += f"\n*{len(tables_content)} table(s) found*"
+            return markdown
+
+        # For measures, tables, and all - use the parsed TMDL parts
         parts = await _get_model_definition_parts(fabric_client, powerbi_client, workspace_id, dataset_id)
-
         if not parts:
-            return f"Error: Could not retrieve definition for semantic model '{dataset_name}'"
+            return f"Error: Could not retrieve definition for '{dataset_name}'"
 
-        # Parse measures from all table TMDL files
-        all_measures = []
+        markdown = ""
 
-        for path, content in parts:
-            if "/tables/" in path and path.endswith(".tmdl"):
-                table_name = _parse_tmdl_table_name(content)
-                measures = _parse_tmdl_measures(content)
+        # --- Measures section ---
+        if aspect in ("measures", "all"):
+            all_measures = []
+            for path, content in parts:
+                if "/tables/" in path and path.endswith(".tmdl"):
+                    table_name = _parse_tmdl_table_name(content)
+                    measures = _parse_tmdl_measures(content)
+                    for measure in measures:
+                        measure['table'] = table_name
+                        all_measures.append(measure)
 
-                for measure in measures:
-                    measure['table'] = table_name
-                    all_measures.append(measure)
-
-        # Filter by search term if provided
-        if search:
-            search_lower = search.lower()
-            all_measures = [
-                m for m in all_measures
-                if search_lower in m['name'].lower()
-                or search_lower in m.get('description', '').lower()
-                or search_lower in m.get('displayFolder', '').lower()
-            ]
-
-        if not all_measures:
             if search:
-                return f"No measures found matching '{search}' in '{dataset_name}'"
-            return f"No measures found in semantic model '{dataset_name}'"
+                search_lower = search.lower()
+                all_measures = [
+                    m for m in all_measures
+                    if search_lower in m['name'].lower()
+                    or search_lower in m.get('description', '').lower()
+                    or search_lower in m.get('displayFolder', '').lower()
+                ]
 
-        # Sort by table and name
-        all_measures.sort(key=lambda m: (m.get('table', ''), m['name']))
+            if all_measures:
+                all_measures.sort(key=lambda m: (m.get('table', ''), m['name']))
+                markdown += f"# Measures in {dataset_name}\n\n"
+                if search:
+                    markdown += f"*Filtered by: '{search}'*\n\n"
+                markdown += f"**{len(all_measures)} measure(s) found**\n\n"
 
-        # Format as markdown
-        markdown = f"# Measures in {dataset_name}\n\n"
+                current_table = None
+                for measure in all_measures:
+                    table = measure.get('table', 'Unknown')
+                    if table != current_table:
+                        markdown += f"\n## Table: {table}\n\n"
+                        current_table = table
+                    markdown += f"### {measure['name']}\n\n"
+                    if measure.get('description'):
+                        markdown += f"*{measure['description']}*\n\n"
+                    if measure.get('displayFolder'):
+                        markdown += f"**Folder:** {measure['displayFolder']}\n"
+                    if measure.get('formatString'):
+                        markdown += f"**Format:** `{measure['formatString']}`\n"
+                    if include_expression and measure.get('expression'):
+                        expr = measure['expression']
+                        if len(expr) > 500:
+                            markdown += f"\n```dax\n{expr[:500]}...\n```\n\n"
+                        else:
+                            markdown += f"\n```dax\n{expr}\n```\n\n"
+                    else:
+                        markdown += "\n"
+            elif aspect == "measures":
+                if search:
+                    return f"No measures found matching '{search}' in '{dataset_name}'"
+                return f"No measures found in semantic model '{dataset_name}'"
 
-        if search:
-            markdown += f"*Filtered by: '{search}'*\n\n"
+        # --- Tables section ---
+        if aspect in ("tables", "all"):
+            all_tables = []
+            for path, content in parts:
+                if "/tables/" in path and path.endswith(".tmdl"):
+                    table_name = _parse_tmdl_table_name(content)
+                    columns = _parse_tmdl_columns(content)
+                    if not include_hidden:
+                        columns = [c for c in columns if not c.get('isHidden', False)]
+                    all_tables.append({'name': table_name, 'columns': columns})
 
-        markdown += f"**{len(all_measures)} measure(s) found**\n\n"
+            if all_tables:
+                all_tables.sort(key=lambda t: t['name'])
+                markdown += f"\n# Tables in {dataset_name}\n\n"
+                markdown += f"**{len(all_tables)} table(s) found**\n\n"
+                markdown += "Use column references in format: `'TableName'[ColumnName]`\n\n"
 
-        current_table = None
-        for measure in all_measures:
-            table = measure.get('table', 'Unknown')
+                for table in all_tables:
+                    table_name = table['name']
+                    columns = table['columns']
+                    markdown += f"## {table_name}\n\n"
+                    if not columns:
+                        markdown += "*No visible columns*\n\n"
+                        continue
+                    markdown += "| Column | Data Type | Description |\n"
+                    markdown += "|--------|-----------|-------------|\n"
+                    for col in columns:
+                        col_name = col['name']
+                        data_type = col.get('dataType', 'unknown')
+                        description = col.get('description', '')
+                        col_ref = f"`'{table_name}'[{col_name}]`"
+                        markdown += f"| {col_ref} | {data_type} | {description} |\n"
+                    markdown += "\n"
+            elif aspect == "tables":
+                return f"No tables found in semantic model '{dataset_name}'"
 
-            if table != current_table:
-                markdown += f"\n## Table: {table}\n\n"
-                current_table = table
-
-            markdown += f"### {measure['name']}\n\n"
-
-            if measure.get('description'):
-                markdown += f"*{measure['description']}*\n\n"
-
-            if measure.get('displayFolder'):
-                markdown += f"**Folder:** {measure['displayFolder']}\n"
-
-            if measure.get('formatString'):
-                markdown += f"**Format:** `{measure['formatString']}`\n"
-
-            if include_expression and measure.get('expression'):
-                expr = measure['expression']
-                if len(expr) > 500:
-                    markdown += f"\n```dax\n{expr[:500]}...\n```\n\n"
-                else:
-                    markdown += f"\n```dax\n{expr}\n```\n\n"
-            else:
-                markdown += "\n"
+        if not markdown:
+            return f"Error: Unknown aspect '{aspect}'. Use 'schema', 'measures', 'tables', or 'all'."
 
         return markdown
 
     except Exception as e:
-        logger.error(f"Error getting semantic model measures: {e}")
-        return f"Error getting semantic model measures: {str(e)}"
+        logger.error(f"Error getting semantic model metadata: {e}")
+        return f"Error getting semantic model metadata: {str(e)}"
 
 
 @mcp.tool()
@@ -1255,128 +1144,3 @@ async def get_refresh_history(
         return f"Error getting refresh history: {str(e)}"
 
 
-@mcp.tool()
-async def get_semantic_model_tables(
-    workspace: Optional[str] = None,
-    dataset: Optional[str] = None,
-    include_hidden: bool = False,
-    ctx: Context = None
-) -> str:
-    """List all tables and columns in a semantic model.
-
-    This tool helps you understand the model structure for building filters
-    and group-by clauses when evaluating measures.
-
-    Args:
-        workspace: Workspace name or ID (uses context if not provided)
-        dataset: Dataset/semantic model name or ID (uses context if not provided)
-        include_hidden: Whether to include hidden columns (default: False)
-        ctx: Context object
-
-    Returns:
-        List of tables with:
-        - Table name
-        - Columns with data types
-        - Which columns can be used for filtering/grouping
-
-    Examples:
-        get_semantic_model_tables()  # List all tables and columns
-        get_semantic_model_tables(include_hidden=True)  # Include hidden columns
-
-    Note:
-        Use this tool to find column names for filters and group_by parameters
-        in the evaluate_measure tool. Column references should use the format:
-        'TableName'[ColumnName]
-    """
-    try:
-        credential = get_azure_credentials(ctx.client_id, __ctx_cache)
-        fabric_client = FabricApiClient(credential)
-        powerbi_client = PowerBIClient(credential)
-
-        # Resolve workspace
-        workspace_id = workspace or __ctx_cache.get(f"{ctx.client_id}_workspace")
-        if not workspace_id:
-            return "Error: No workspace specified and no workspace context set."
-
-        workspace_id = await fabric_client.resolve_workspace(workspace_id)
-
-        # Resolve dataset
-        dataset_name = dataset or __ctx_cache.get(f"{ctx.client_id}_semantic_model_name")
-        dataset_id = dataset or __ctx_cache.get(f"{ctx.client_id}_semantic_model")
-        if not dataset_id:
-            return "Error: No dataset specified and no semantic model context set."
-
-        dataset_id = await powerbi_client.resolve_dataset_id(workspace_id, dataset_id, fabric_client)
-
-        # Get model name for display
-        if not dataset_name or dataset_name == dataset_id:
-            models = await fabric_client.get_semantic_models(workspace_id)
-            model_info = next((m for m in models if m.get("id") == dataset_id), {})
-            dataset_name = model_info.get("displayName", dataset_id)
-
-        logger.info(f"Getting tables for semantic model {dataset_id}")
-
-        # Get TMDL parts
-        parts = await _get_model_definition_parts(fabric_client, powerbi_client, workspace_id, dataset_id)
-
-        if not parts:
-            return f"Error: Could not retrieve definition for semantic model '{dataset_name}'"
-
-        # Parse tables and columns from TMDL files
-        all_tables = []
-
-        for path, content in parts:
-            if "/tables/" in path and path.endswith(".tmdl"):
-                table_name = _parse_tmdl_table_name(content)
-                columns = _parse_tmdl_columns(content)
-
-                # Filter hidden columns unless requested
-                if not include_hidden:
-                    columns = [c for c in columns if not c.get('isHidden', False)]
-
-                all_tables.append({
-                    'name': table_name,
-                    'columns': columns
-                })
-
-        if not all_tables:
-            return f"No tables found in semantic model '{dataset_name}'"
-
-        # Sort tables by name
-        all_tables.sort(key=lambda t: t['name'])
-
-        # Format as markdown
-        markdown = f"# Tables in {dataset_name}\n\n"
-        markdown += f"**{len(all_tables)} table(s) found**\n\n"
-        markdown += "Use column references in format: `'TableName'[ColumnName]`\n\n"
-
-        for table in all_tables:
-            table_name = table['name']
-            columns = table['columns']
-
-            markdown += f"## {table_name}\n\n"
-
-            if not columns:
-                markdown += "*No visible columns*\n\n"
-                continue
-
-            markdown += "| Column | Data Type | Description |\n"
-            markdown += "|--------|-----------|-------------|\n"
-
-            for col in columns:
-                col_name = col['name']
-                data_type = col.get('dataType', 'unknown')
-                description = col.get('description', '')
-
-                # Show DAX reference format
-                col_ref = f"`'{table_name}'[{col_name}]`"
-
-                markdown += f"| {col_ref} | {data_type} | {description} |\n"
-
-            markdown += "\n"
-
-        return markdown
-
-    except Exception as e:
-        logger.error(f"Error getting semantic model tables: {e}")
-        return f"Error getting semantic model tables: {str(e)}"

@@ -394,11 +394,11 @@ async def manage_semantic_model(
                     markdown += "## Tables\n\n"
                     for path, content in sorted(tables_content):
                         table_name = path.split("/tables/")[-1].replace(".tmdl", "") if "/tables/" in path else "Unknown"
-                        markdown += f"### {table_name}\n\n```\n{content[:2000]}{'...' if len(content) > 2000 else ''}\n```\n\n"
+                        markdown += f"### {table_name}\n\n```\n{content}\n```\n\n"
                 if relationships_content:
                     markdown += "## Relationships\n\n"
                     for content in relationships_content:
-                        markdown += f"```\n{content[:2000]}{'...' if len(content) > 2000 else ''}\n```\n\n"
+                        markdown += f"```\n{content}\n```\n\n"
                 markdown += f"\n*{len(tables_content)} table(s) found*"
                 return markdown
 
@@ -440,10 +440,7 @@ async def manage_semantic_model(
                             markdown += f"**Format:** `{measure['formatString']}`\n"
                         if include_expression and measure.get('expression'):
                             expr = measure['expression']
-                            if len(expr) > 500:
-                                markdown += f"\n```dax\n{expr[:500]}...\n```\n\n"
-                            else:
-                                markdown += f"\n```dax\n{expr}\n```\n\n"
+                            markdown += f"\n```dax\n{expr}\n```\n\n"
                         else:
                             markdown += "\n"
                 elif aspect == "measures":
